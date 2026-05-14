@@ -1,0 +1,27 @@
+{
+  "name": "@hubnet/chat-sdk",
+  "version": "0.1.0",
+  "description": "Typed XMPP chat client for apps and services.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.0.1",
+    "@noble/curves": "^2.0.1",
+    "@noble/hashes": "^2.0.1",
+    "@xmpp/client": "^0.14.0",
+    "saslmechanisms": "^0.1.1"
+  },
+  "devDependencies": {
+    "@types/xmpp__client": "^0.14.1",
+    "typescript": "^5.9.2"
+  }
+}
