@@ -1,0 +1,57 @@
+# This workflow runs tests, builds, bumps the patch version, and publishes to GitHub Packages on main.
+name: Build and Publish
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PUBLISHER_GITHUB_PERSONAL_ACCESS_TOKEN }}
+
+      - name: Setup Node with GitHub Packages registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://npm.pkg.github.com
+          scope: "@hubnet-systems"
+          always-auth: true
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Bump version
+        run: npm version patch --no-git-tag-version
+
+      - name: Build package
+        run: npm run build
+
+      - name: Commit version bump
+        if: success()
+        run: |
+          git config --local user.email "${{ secrets.PUBLISHER_GITHUB_USER_EMAIL }}"
+          git config --local user.name "devopsHubnet"
+          git add package.json package-lock.json
+          git commit -m "Bump version to v$(node -p "require('./package.json').version")"$'\n\n'"[actions skip]" || true
+          git push origin main
+
+      - name: Publish package
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.PUBLISH_GITHUB_PACKAGES_TOKEN }}
+
+      - name: Create git tag
+        if: success()
+        run: |
+          git tag v$(node -p "require('./package.json').version")
+          git push origin v$(node -p "require('./package.json').version")

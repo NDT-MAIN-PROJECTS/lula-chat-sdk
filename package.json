@@ -1,17 +1,37 @@
 {
-  "name": "@hubnet/chat-sdk",
+  "name": "@hubnet-systems/chat-sdk",
   "version": "0.1.0",
   "description": "Typed XMPP chat client for apps and services.",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "npm run test && npm run clean && npm run build:js && npm run build:types",
+    "build:js": "tsup",
+    "build:types": "tsc -p tsconfig.build.json",
+    "build:nodocs": "npm run test && npm run clean && npm run build:js && npm run build:types",
+    "clean": "rimraf dist",
+    "start": "npm run build:js -- --watch",
+    "test": "npm run typecheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "bump": "npm version prerelease"
+  },
+  "publishConfig": {
+    "access": "restricted"
   },
   "dependencies": {
     "@noble/ciphers": "^2.0.1",
@@ -21,7 +41,14 @@
     "saslmechanisms": "^0.1.1"
   },
   "devDependencies": {
+    "@types/node": "^20.1.0",
     "@types/xmpp__client": "^0.14.1",
+    "rimraf": "^4.4.0",
+    "tsup": "^8.5.0",
     "typescript": "^5.9.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:hubnet-systems/chat-sdk.git"
   }
 }
