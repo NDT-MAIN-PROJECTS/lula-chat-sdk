@@ -735,7 +735,9 @@ class LulaChatClient implements ChatClient {
 
   private async connectFresh(): Promise<void> {
     this.setStatus("connecting");
-    registerXOAuth2Preference();
+    if (this.config.authType === "x-oauth2") {
+      registerXOAuth2Preference();
+    }
     const xmpp = createXmppClient({
       service: this.config.service,
       domain: this.config.domain,
@@ -744,7 +746,9 @@ class LulaChatClient implements ChatClient {
     });
 
     this.xmpp = xmpp;
-    registerXOAuth2OnClient(xmpp);
+    if (this.config.authType === "x-oauth2") {
+      registerXOAuth2OnClient(xmpp);
+    }
     this.bindXmppEvents(xmpp);
 
     try {
@@ -787,7 +791,28 @@ class LulaChatClient implements ChatClient {
       };
     }
 
-    return { username, password: secret };
+    return async (
+      authenticate: (
+        credentials: { username?: string; password?: string },
+        mechanism: string,
+        userAgent?: unknown,
+      ) => Promise<void>,
+      mechanisms: string[],
+      _fast: unknown,
+      entity: { isSecure?: () => boolean },
+    ) => {
+      const secure = entity?.isSecure?.() ?? false;
+      const preferred = secure ? ["SCRAM-SHA-1", "PLAIN", "ANONYMOUS"] : ["SCRAM-SHA-1", "ANONYMOUS"];
+      const picked = pickMechanism(mechanisms, preferred);
+      if (!picked) {
+        throw new Error(`chat_no_usable_auth_mechanism:${mechanisms.join(",")}`);
+      }
+      await authenticate(
+        { username, password: secret },
+        picked,
+        xml("user-agent", { id: "lulafi-chat-sdk" }),
+      );
+    };
   }
 
   private bindXmppEvents(xmpp: XmppClientLike): void {
