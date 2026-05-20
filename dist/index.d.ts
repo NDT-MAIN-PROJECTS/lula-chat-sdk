@@ -81,6 +81,13 @@ export type ChatMessage = {
     metadata?: Record<string, unknown>;
     raw?: unknown;
 };
+export type ChatMessageContext = {
+    type?: "direct" | "form_thread" | string;
+    providerChatRoomId?: string;
+    submissionId?: string;
+    senderName?: string;
+    [key: string]: unknown;
+};
 export type ChatMessageInput = {
     toJid?: string;
     toJids?: string[];
@@ -88,9 +95,39 @@ export type ChatMessageInput = {
     peerJids?: string[];
     body: string;
     roomId?: string;
+    targetRoomId?: string;
     metadata?: Record<string, unknown>;
     id?: string;
     requestReceipt?: boolean;
+};
+export type ChatTextMessageInput = Omit<ChatMessageInput, "metadata"> & {
+    metadata?: Record<string, unknown>;
+    context?: ChatMessageContext;
+};
+export type ChatTextMessage = ChatMessage & {
+    context?: ChatMessageContext;
+    providerChatRoomId?: string;
+    submissionId?: string;
+};
+export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"> & {
+    payload: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+    formId?: string;
+    providerUserId?: string;
+    recordId?: string;
+    formVersion?: number;
+    providerChatRoomId?: string;
+    submittedAt?: string;
+    pretty?: boolean;
+};
+export type ChatFormSubmissionMessage = ChatMessage & {
+    payload: Record<string, unknown>;
+    providerChatRoomId?: string;
+    formId?: string;
+    providerUserId?: string;
+    recordId?: string;
+    formVersion?: number;
+    submittedAt?: string;
 };
 export type ChatTypingInput = {
     roomId: string;
@@ -185,6 +222,11 @@ export type ChatClient = {
         (input: ChatRoomLookupInput): Promise<ChatRoom>;
     };
     getPeerJids: (roomId: string) => Promise<string[]>;
+    sendChatMessage: {
+        (message: ChatTextMessageInput): Promise<string>;
+        (roomId: string, body: string, options?: Omit<ChatTextMessageInput, "roomId" | "body">): Promise<string>;
+    };
+    sendFormSubmission: (message: ChatFormSubmissionInput) => Promise<string>;
     sendMessage: {
         (message: ChatMessageInput): Promise<string>;
         (roomId: string, body: string, options?: Omit<ChatMessageInput, "roomId" | "body">): Promise<string>;
@@ -202,6 +244,8 @@ export type ChatClient = {
         (input: ChatDisplayedInput): Promise<void>;
     };
     onMessage: (listener: (message: ChatMessage) => void) => Unsubscribe;
+    onChatMessage: (listener: (message: ChatTextMessage) => void) => Unsubscribe;
+    onFormSubmission: (listener: (message: ChatFormSubmissionMessage) => void) => Unsubscribe;
     onTyping: (listener: (event: ChatTypingEvent) => void) => Unsubscribe;
     onDelivery: (listener: (event: ChatDeliveryEvent) => void) => Unsubscribe;
     onError: (listener: (event: ChatErrorEvent) => void) => Unsubscribe;
@@ -224,6 +268,14 @@ export declare function init(config: ChatClientConfig): ChatClient;
 export declare function createChatClient(config: ChatClientConfig): ChatClient;
 export declare function createRoomDirectory(options: ChatRoomDirectoryOptions): ChatRoomDirectory;
 export declare function createOmemoEncryption(options?: OmemoEncryptionOptions): ChatEncryption;
+export declare function extractProviderChatRoomId(metadata?: Record<string, unknown>): string | undefined;
+export declare function extractSubmissionId(metadata?: Record<string, unknown>): string | undefined;
+export declare function buildChatMessageMetadata(input: {
+    roomId?: string;
+    metadata?: Record<string, unknown>;
+    context?: ChatMessageContext;
+}): Record<string, unknown> | undefined;
+export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerChatRoomId" | "submittedAt">): Record<string, unknown>;
 export declare function createMemoryStorageBackend(): ChatKeyValueStore;
 export declare function createIndexDbStorageBackend(options?: IndexDbStorageOptions): ChatKeyValueStore;
 export declare function createMongoDbStorageBackend(options: MongoDbStorageOptions): ChatKeyValueStore;

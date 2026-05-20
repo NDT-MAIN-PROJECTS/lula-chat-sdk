@@ -30,6 +30,8 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
+  buildChatMessageMetadata: () => buildChatMessageMetadata,
+  buildFormSubmissionMetadata: () => buildFormSubmissionMetadata,
   chatResources: () => chatResources,
   createChatClient: () => createChatClient,
   createIndexDbStorageBackend: () => createIndexDbStorageBackend,
@@ -37,6 +39,8 @@ __export(index_exports, {
   createMongoDbStorageBackend: () => createMongoDbStorageBackend,
   createOmemoEncryption: () => createOmemoEncryption,
   createRoomDirectory: () => createRoomDirectory,
+  extractProviderChatRoomId: () => extractProviderChatRoomId,
+  extractSubmissionId: () => extractSubmissionId,
   init: () => init,
   storageBackends: () => storageBackends
 });
@@ -183,6 +187,26 @@ var LulaChatClient = class {
     const input = typeof inputOrUserName === "string" ? { userName: inputOrUserName, metadata } : inputOrUserName;
     return this.resolveRoomForUserName(input);
   }
+  async sendChatMessage(inputOrRoomId, body, options) {
+    const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, body: body ?? "" } : inputOrRoomId;
+    const metadata = buildChatMessageMetadata(input);
+    const providerChatRoomId = extractProviderChatRoomId(metadata);
+    return this.sendMessage({
+      ...input,
+      metadata,
+      targetRoomId: input.targetRoomId ?? providerChatRoomId ?? input.roomId
+    });
+  }
+  async sendFormSubmission(input) {
+    const metadata = buildFormSubmissionMetadata(input);
+    const providerChatRoomId = extractProviderChatRoomId(metadata);
+    return this.sendMessage({
+      ...pickMessageTargetInput(input),
+      body: JSON.stringify(input.payload, null, input.pretty ? 2 : void 0),
+      metadata,
+      targetRoomId: input.targetRoomId ?? providerChatRoomId ?? input.roomId
+    });
+  }
   async sendMessage(inputOrToJid, body, options) {
     const input = typeof inputOrToJid === "string" ? { ...options ?? {}, roomId: inputOrToJid, body: body ?? "" } : inputOrToJid;
     const messageBody = input.body ?? "";
@@ -191,8 +215,9 @@ var LulaChatClient = class {
     const xmpp = this.requireXmpp();
     const id = input.id || generateMessageId();
     const roomId = input.roomId?.trim();
+    const targetRoomId = input.targetRoomId?.trim() || roomId;
     const targetJids = await this.resolveRoomTargets({
-      roomId,
+      roomId: targetRoomId,
       explicitJids: collectTargetJids(input)
     });
     await this.sendToTargets(targetJids, async (toJid) => {
@@ -213,6 +238,9 @@ var LulaChatClient = class {
       await xmpp.send((0, import_client.xml)("message", { to: toJid, type: "chat", id }, ...children));
     });
     this.rememberRoomPeers(roomId, targetJids);
+    if (targetRoomId && targetRoomId !== roomId) {
+      this.rememberRoomPeers(targetRoomId, targetJids);
+    }
     return id;
   }
   async sendTyping(inputOrRoomId, options) {
@@ -275,6 +303,18 @@ var LulaChatClient = class {
   }
   onMessage(listener) {
     return addListener(this.messageListeners, listener);
+  }
+  onChatMessage(listener) {
+    return this.onMessage((message) => {
+      if (parseFormSubmissionMessage(message)) return;
+      listener(toChatTextMessage(message));
+    });
+  }
+  onFormSubmission(listener) {
+    return this.onMessage((message) => {
+      const parsed = parseFormSubmissionMessage(message);
+      if (parsed) listener(parsed);
+    });
   }
   onTyping(listener) {
     return addListener(this.typingListeners, listener);
@@ -984,6 +1024,72 @@ function normalizeConfig(config) {
     encryption: config.encryption
   };
 }
+function extractProviderChatRoomId(metadata) {
+  if (!metadata) return void 0;
+  const lulaPayload = isRecord(metadata.lulaPayload) ? metadata.lulaPayload : void 0;
+  const lulaSubmission = isRecord(metadata.lulaSubmission) ? metadata.lulaSubmission : void 0;
+  return firstString(
+    metadata.providerChatRoomId,
+    lulaPayload?.providerChatRoomId,
+    lulaSubmission?.providerChatRoomId
+  );
+}
+function extractSubmissionId(metadata) {
+  if (!metadata) return void 0;
+  const lulaSubmission = isRecord(metadata.lulaSubmission) ? metadata.lulaSubmission : void 0;
+  return firstString(metadata.submissionId, lulaSubmission?.submissionId);
+}
+function buildChatMessageMetadata(input) {
+  const metadata = { ...input.metadata ?? {} };
+  const providerChatRoomId = firstString(
+    input.context?.providerChatRoomId,
+    extractProviderChatRoomId(metadata),
+    input.roomId
+  );
+  if (providerChatRoomId) {
+    metadata.providerChatRoomId = providerChatRoomId;
+  }
+  if (typeof metadata.sentAtMs !== "number") {
+    metadata.sentAtMs = Date.now();
+  }
+  const context = input.context;
+  const shouldWriteSubmissionContext = context && (context.type === "form_thread" || typeof context.submissionId === "string" || typeof context.senderName === "string");
+  if (shouldWriteSubmissionContext) {
+    const existing = isRecord(metadata.lulaSubmission) ? metadata.lulaSubmission : {};
+    const { providerChatRoomId: _providerChatRoomId, type: _type, ...rest } = context;
+    metadata.lulaSubmission = removeUndefinedValues({
+      ...existing,
+      ...rest,
+      ...providerChatRoomId ? { providerChatRoomId } : {}
+    });
+  }
+  return Object.keys(metadata).length > 0 ? metadata : void 0;
+}
+function buildFormSubmissionMetadata(input) {
+  const metadata = { ...input.metadata ?? {} };
+  const providerChatRoomId = firstString(
+    input.providerChatRoomId,
+    extractProviderChatRoomId(metadata)
+  );
+  const existingPayload = isRecord(metadata.lulaPayload) ? metadata.lulaPayload : {};
+  if (providerChatRoomId) {
+    metadata.providerChatRoomId = providerChatRoomId;
+  }
+  if (typeof metadata.sentAtMs !== "number") {
+    metadata.sentAtMs = Date.now();
+  }
+  metadata.lulaPayload = removeUndefinedValues({
+    ...existingPayload,
+    submissionRoomId: input.roomId,
+    formId: input.formId,
+    providerUserId: input.providerUserId,
+    recordId: input.recordId,
+    formVersion: input.formVersion,
+    providerChatRoomId,
+    submittedAt: input.submittedAt ?? (typeof existingPayload.submittedAt === "string" ? existingPayload.submittedAt : (/* @__PURE__ */ new Date()).toISOString())
+  });
+  return metadata;
+}
 function collectTargetJids(input) {
   return normalizeJidList([
     input.toJid,
@@ -995,6 +1101,75 @@ function collectTargetJids(input) {
 function normalizeJidList(values) {
   const normalized = values.map((value) => normalizeBareJid(value)).filter((value) => value.length > 0);
   return Array.from(new Set(normalized));
+}
+function pickMessageTargetInput(input) {
+  return {
+    toJid: input.toJid,
+    toJids: input.toJids,
+    peerJid: input.peerJid,
+    peerJids: input.peerJids,
+    roomId: input.roomId,
+    targetRoomId: input.targetRoomId,
+    id: input.id,
+    requestReceipt: input.requestReceipt
+  };
+}
+function toChatTextMessage(message) {
+  const metadata = message.metadata;
+  const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
+  const submissionId = extractSubmissionId(metadata);
+  const lulaSubmission = isRecord(metadata?.lulaSubmission) ? metadata?.lulaSubmission : void 0;
+  const context = removeUndefinedValues({
+    ...lulaSubmission ?? {},
+    ...providerChatRoomId ? { providerChatRoomId } : {},
+    ...submissionId ? { submissionId } : {},
+    ...lulaSubmission ? { type: "form_thread" } : {}
+  });
+  return {
+    ...message,
+    providerChatRoomId,
+    submissionId,
+    ...Object.keys(context).length > 0 ? { context } : {}
+  };
+}
+function parseFormSubmissionMessage(message) {
+  const payload = parseJsonRecord(message.body);
+  if (!payload) return null;
+  const metadata = message.metadata;
+  const lulaPayload = isRecord(metadata?.lulaPayload) ? metadata?.lulaPayload : void 0;
+  const isExplicitFormPayload = payload.type === "form_submission";
+  const isReadableSubmissionPayload = isRecord(payload.readable) || isRecord(payload.raw);
+  if (!lulaPayload && !isExplicitFormPayload && !isReadableSubmissionPayload) {
+    return null;
+  }
+  const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
+  return {
+    ...message,
+    payload,
+    providerChatRoomId,
+    formId: firstString(lulaPayload?.formId, payload.formId),
+    providerUserId: firstString(lulaPayload?.providerUserId, payload.providerUserId),
+    recordId: firstString(lulaPayload?.recordId, payload.recordId),
+    formVersion: typeof lulaPayload?.formVersion === "number" ? lulaPayload.formVersion : typeof payload.formVersion === "number" ? payload.formVersion : void 0,
+    submittedAt: firstString(lulaPayload?.submittedAt, payload.submittedAt)
+  };
+}
+function parseJsonRecord(input) {
+  try {
+    const parsed = JSON.parse(input);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+function removeUndefinedValues(input) {
+  const output = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (value !== void 0) {
+      output[key] = value;
+    }
+  }
+  return output;
 }
 function registerXOAuth2OnClient(xmpp) {
   const candidate = xmpp;
@@ -1364,6 +1539,8 @@ function decodeJsonBase64(value) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  buildChatMessageMetadata,
+  buildFormSubmissionMetadata,
   chatResources,
   createChatClient,
   createIndexDbStorageBackend,
@@ -1371,6 +1548,8 @@ function decodeJsonBase64(value) {
   createMongoDbStorageBackend,
   createOmemoEncryption,
   createRoomDirectory,
+  extractProviderChatRoomId,
+  extractSubmissionId,
   init,
   storageBackends
 });

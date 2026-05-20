@@ -21,26 +21,52 @@ const chatClient = init({
   roomDirectory,
 });
 
-const { connect, onMessage, sendMessage, sendTyping, markRead } = chatClient;
+const {
+  connect,
+  onChatMessage,
+  onFormSubmission,
+  sendChatMessage,
+  sendFormSubmission,
+  sendTyping,
+  markRead,
+} = chatClient;
 
-onMessage((message) => {
+onChatMessage((message) => {
   console.log(message.fromJid, message.body);
   markRead(message.roomId!, message.id);
+});
+
+onFormSubmission((message) => {
+  console.log(message.formId, message.payload);
 });
 
 await connect();
 
 const room = await chatClient.getOrCreateRoom("i.peer456");
 
-await sendMessage(room.roomId, "Hello");
+await sendChatMessage(room.roomId, "Hello");
 
-await sendMessage({
+await sendChatMessage({
   roomId: room.roomId,
   body: "Hello again",
-  metadata: {
-    providerChatRoomId: room.roomId,
-    sentAtMs: Date.now(),
+  context: {
+    type: "form_thread",
+    submissionId: "submission-123",
+    senderName: "Agent",
   },
+});
+
+await sendFormSubmission({
+  roomId: room.roomId,
+  payload: {
+    readable: {
+      name: { label: "Name", value: "Taylor" },
+    },
+    raw: {
+      name: "Taylor",
+    },
+  },
+  formId: "form-123",
 });
 
 await sendTyping(room.roomId);
@@ -54,17 +80,21 @@ await sendTyping(room.roomId);
 - `stop()` to close the stream.
 - `getOrCreateRoom(userName)` to fetch the room your backend owns for that peer.
 - `onMessage(listener)` for chat messages.
+- `onChatMessage(listener)` for human chat messages.
+- `onFormSubmission(listener)` for structured form submission payloads.
 - `onTyping(listener)` for composing and paused states.
 - `onDelivery(listener)` for delivered and read events.
 - `onError(listener)` for stanza and runtime errors.
 - `onStatus(listener)` for connection state.
+- `sendChatMessage({ roomId, body })` to send human chat text.
+- `sendFormSubmission({ roomId, payload })` to send a JSON form submission payload.
 - `sendMessage({ roomId, body })` to send a chat message.
 - `sendMessage(roomId, body)` for the same room-first path.
 - `sendTyping(roomId)` to send composing. The SDK sends paused after 10 seconds.
 - `sendTyping(roomId, { isTyping: false })` to send paused at once.
 - `sendDisplayed(roomId, messageId)` or `markRead(roomId, messageId)` for read markers.
 
-The SDK resolves room JIDs inside `sendMessage()`, `sendTyping()`, and read markers. Pass `roomDirectory` in `init()` for the normal fanout path.
+The SDK resolves room JIDs inside `sendChatMessage()`, `sendFormSubmission()`, `sendMessage()`, `sendTyping()`, and read markers. Pass `roomDirectory` in `init()` for the normal fanout path.
 
 The SDK remembers room peers after sends or incoming room messages.
 
@@ -95,6 +125,40 @@ const chatClient = init({
 `resolveRoomJids` still works as a fallback for older call sites. New code should prefer `roomDirectory`.
 
 The SDK client also exposes `getPeerJids(roomId)`. That gives app code one SDK method to ask for the current fanout targets, no matter if they came from cache, incoming messages, or a configured provider.
+
+## Chat vs Form Payloads
+
+Use `sendChatMessage()` for human text. It keeps the body as plain text and writes Lula metadata for room context:
+
+```ts
+await chatClient.sendChatMessage({
+  roomId,
+  peerJid,
+  body: "Thanks for the submission.",
+  context: {
+    type: "form_thread",
+    submissionId,
+    senderName: "Agent",
+  },
+});
+```
+
+Use `sendFormSubmission()` for structured form data. It serializes the payload as JSON and writes the `lulaPayload` metadata block:
+
+```ts
+await chatClient.sendFormSubmission({
+  roomId,
+  payload: {
+    readable,
+    raw,
+  },
+  formId,
+  providerUserId,
+  providerChatRoomId,
+});
+```
+
+`sendMessage()` remains available as the lower-level escape hatch.
 
 ## Auth
 

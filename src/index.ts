@@ -122,6 +122,14 @@ export type ChatMessage = {
   raw?: unknown;
 };
 
+export type ChatMessageContext = {
+  type?: "direct" | "form_thread" | string;
+  providerChatRoomId?: string;
+  submissionId?: string;
+  senderName?: string;
+  [key: string]: unknown;
+};
+
 export type ChatMessageInput = {
   toJid?: string;
   toJids?: string[];
@@ -129,9 +137,43 @@ export type ChatMessageInput = {
   peerJids?: string[];
   body: string;
   roomId?: string;
+  targetRoomId?: string;
   metadata?: Record<string, unknown>;
   id?: string;
   requestReceipt?: boolean;
+};
+
+export type ChatTextMessageInput = Omit<ChatMessageInput, "metadata"> & {
+  metadata?: Record<string, unknown>;
+  context?: ChatMessageContext;
+};
+
+export type ChatTextMessage = ChatMessage & {
+  context?: ChatMessageContext;
+  providerChatRoomId?: string;
+  submissionId?: string;
+};
+
+export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"> & {
+  payload: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  formId?: string;
+  providerUserId?: string;
+  recordId?: string;
+  formVersion?: number;
+  providerChatRoomId?: string;
+  submittedAt?: string;
+  pretty?: boolean;
+};
+
+export type ChatFormSubmissionMessage = ChatMessage & {
+  payload: Record<string, unknown>;
+  providerChatRoomId?: string;
+  formId?: string;
+  providerUserId?: string;
+  recordId?: string;
+  formVersion?: number;
+  submittedAt?: string;
 };
 
 export type ChatTypingInput = {
@@ -246,6 +288,15 @@ export type ChatClient = {
     (input: ChatRoomLookupInput): Promise<ChatRoom>;
   };
   getPeerJids: (roomId: string) => Promise<string[]>;
+  sendChatMessage: {
+    (message: ChatTextMessageInput): Promise<string>;
+    (
+      roomId: string,
+      body: string,
+      options?: Omit<ChatTextMessageInput, "roomId" | "body">,
+    ): Promise<string>;
+  };
+  sendFormSubmission: (message: ChatFormSubmissionInput) => Promise<string>;
   sendMessage: {
     (message: ChatMessageInput): Promise<string>;
     (
@@ -267,6 +318,8 @@ export type ChatClient = {
     (input: ChatDisplayedInput): Promise<void>;
   };
   onMessage: (listener: (message: ChatMessage) => void) => Unsubscribe;
+  onChatMessage: (listener: (message: ChatTextMessage) => void) => Unsubscribe;
+  onFormSubmission: (listener: (message: ChatFormSubmissionMessage) => void) => Unsubscribe;
   onTyping: (listener: (event: ChatTypingEvent) => void) => Unsubscribe;
   onDelivery: (listener: (event: ChatDeliveryEvent) => void) => Unsubscribe;
   onError: (listener: (event: ChatErrorEvent) => void) => Unsubscribe;
@@ -474,6 +527,35 @@ class LulaChatClient implements ChatClient {
     return this.resolveRoomForUserName(input);
   }
 
+  public async sendChatMessage(
+    inputOrRoomId: ChatTextMessageInput | string,
+    body?: string,
+    options?: Omit<ChatTextMessageInput, "roomId" | "body">,
+  ): Promise<string> {
+    const input =
+      typeof inputOrRoomId === "string"
+        ? { ...(options ?? {}), roomId: inputOrRoomId, body: body ?? "" }
+        : inputOrRoomId;
+    const metadata = buildChatMessageMetadata(input);
+    const providerChatRoomId = extractProviderChatRoomId(metadata);
+    return this.sendMessage({
+      ...input,
+      metadata,
+      targetRoomId: input.targetRoomId ?? providerChatRoomId ?? input.roomId,
+    });
+  }
+
+  public async sendFormSubmission(input: ChatFormSubmissionInput): Promise<string> {
+    const metadata = buildFormSubmissionMetadata(input);
+    const providerChatRoomId = extractProviderChatRoomId(metadata);
+    return this.sendMessage({
+      ...pickMessageTargetInput(input),
+      body: JSON.stringify(input.payload, null, input.pretty ? 2 : undefined),
+      metadata,
+      targetRoomId: input.targetRoomId ?? providerChatRoomId ?? input.roomId,
+    });
+  }
+
   public async sendMessage(
     inputOrToJid: ChatMessageInput | string,
     body?: string,
@@ -490,8 +572,9 @@ class LulaChatClient implements ChatClient {
     const xmpp = this.requireXmpp();
     const id = input.id || generateMessageId();
     const roomId = input.roomId?.trim();
+    const targetRoomId = input.targetRoomId?.trim() || roomId;
     const targetJids = await this.resolveRoomTargets({
-      roomId,
+      roomId: targetRoomId,
       explicitJids: collectTargetJids(input),
     });
 
@@ -515,6 +598,9 @@ class LulaChatClient implements ChatClient {
       await xmpp.send(xml("message", { to: toJid, type: "chat", id }, ...children));
     });
     this.rememberRoomPeers(roomId, targetJids);
+    if (targetRoomId && targetRoomId !== roomId) {
+      this.rememberRoomPeers(targetRoomId, targetJids);
+    }
     return id;
   }
 
@@ -601,6 +687,20 @@ class LulaChatClient implements ChatClient {
 
   public onMessage(listener: (message: ChatMessage) => void): Unsubscribe {
     return addListener(this.messageListeners, listener);
+  }
+
+  public onChatMessage(listener: (message: ChatTextMessage) => void): Unsubscribe {
+    return this.onMessage((message) => {
+      if (parseFormSubmissionMessage(message)) return;
+      listener(toChatTextMessage(message));
+    });
+  }
+
+  public onFormSubmission(listener: (message: ChatFormSubmissionMessage) => void): Unsubscribe {
+    return this.onMessage((message) => {
+      const parsed = parseFormSubmissionMessage(message);
+      if (parsed) listener(parsed);
+    });
   }
 
   public onTyping(listener: (event: ChatTypingEvent) => void): Unsubscribe {
@@ -1485,6 +1585,121 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
   };
 }
 
+export function extractProviderChatRoomId(metadata?: Record<string, unknown>): string | undefined {
+  if (!metadata) return undefined;
+
+  const lulaPayload = isRecord(metadata.lulaPayload)
+    ? (metadata.lulaPayload as Record<string, unknown>)
+    : undefined;
+  const lulaSubmission = isRecord(metadata.lulaSubmission)
+    ? (metadata.lulaSubmission as Record<string, unknown>)
+    : undefined;
+
+  return firstString(
+    metadata.providerChatRoomId,
+    lulaPayload?.providerChatRoomId,
+    lulaSubmission?.providerChatRoomId,
+  );
+}
+
+export function extractSubmissionId(metadata?: Record<string, unknown>): string | undefined {
+  if (!metadata) return undefined;
+
+  const lulaSubmission = isRecord(metadata.lulaSubmission)
+    ? (metadata.lulaSubmission as Record<string, unknown>)
+    : undefined;
+
+  return firstString(metadata.submissionId, lulaSubmission?.submissionId);
+}
+
+export function buildChatMessageMetadata(input: {
+  roomId?: string;
+  metadata?: Record<string, unknown>;
+  context?: ChatMessageContext;
+}): Record<string, unknown> | undefined {
+  const metadata: Record<string, unknown> = { ...(input.metadata ?? {}) };
+  const providerChatRoomId = firstString(
+    input.context?.providerChatRoomId,
+    extractProviderChatRoomId(metadata),
+    input.roomId,
+  );
+
+  if (providerChatRoomId) {
+    metadata.providerChatRoomId = providerChatRoomId;
+  }
+  if (typeof metadata.sentAtMs !== "number") {
+    metadata.sentAtMs = Date.now();
+  }
+
+  const context = input.context;
+  const shouldWriteSubmissionContext =
+    context &&
+    (context.type === "form_thread" ||
+      typeof context.submissionId === "string" ||
+      typeof context.senderName === "string");
+
+  if (shouldWriteSubmissionContext) {
+    const existing = isRecord(metadata.lulaSubmission)
+      ? (metadata.lulaSubmission as Record<string, unknown>)
+      : {};
+    const { providerChatRoomId: _providerChatRoomId, type: _type, ...rest } = context;
+    metadata.lulaSubmission = removeUndefinedValues({
+      ...existing,
+      ...rest,
+      ...(providerChatRoomId ? { providerChatRoomId } : {}),
+    });
+  }
+
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+export function buildFormSubmissionMetadata(
+  input: Pick<
+    ChatFormSubmissionInput,
+    | "roomId"
+    | "metadata"
+    | "formId"
+    | "providerUserId"
+    | "recordId"
+    | "formVersion"
+    | "providerChatRoomId"
+    | "submittedAt"
+  >,
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = { ...(input.metadata ?? {}) };
+  const providerChatRoomId = firstString(
+    input.providerChatRoomId,
+    extractProviderChatRoomId(metadata),
+  );
+  const existingPayload = isRecord(metadata.lulaPayload)
+    ? (metadata.lulaPayload as Record<string, unknown>)
+    : {};
+
+  if (providerChatRoomId) {
+    metadata.providerChatRoomId = providerChatRoomId;
+  }
+  if (typeof metadata.sentAtMs !== "number") {
+    metadata.sentAtMs = Date.now();
+  }
+
+  metadata.lulaPayload = removeUndefinedValues({
+    ...existingPayload,
+    submissionRoomId: input.roomId,
+    formId: input.formId,
+    providerUserId: input.providerUserId,
+    recordId: input.recordId,
+    formVersion: input.formVersion,
+    providerChatRoomId,
+    submittedAt:
+      input.submittedAt ??
+      (typeof existingPayload.submittedAt === "string"
+        ? existingPayload.submittedAt
+        : new Date().toISOString()),
+  });
+
+  return metadata;
+}
+
 function collectTargetJids(input: {
   toJid?: string;
   toJids?: string[];
@@ -1504,6 +1719,92 @@ function normalizeJidList(values: Array<string | undefined>): string[] {
     .map((value) => normalizeBareJid(value))
     .filter((value) => value.length > 0);
   return Array.from(new Set(normalized));
+}
+
+function pickMessageTargetInput(input: ChatFormSubmissionInput): Omit<ChatMessageInput, "body" | "metadata"> {
+  return {
+    toJid: input.toJid,
+    toJids: input.toJids,
+    peerJid: input.peerJid,
+    peerJids: input.peerJids,
+    roomId: input.roomId,
+    targetRoomId: input.targetRoomId,
+    id: input.id,
+    requestReceipt: input.requestReceipt,
+  };
+}
+
+function toChatTextMessage(message: ChatMessage): ChatTextMessage {
+  const metadata = message.metadata;
+  const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
+  const submissionId = extractSubmissionId(metadata);
+  const lulaSubmission = isRecord(metadata?.lulaSubmission)
+    ? (metadata?.lulaSubmission as Record<string, unknown>)
+    : undefined;
+  const context = removeUndefinedValues({
+    ...(lulaSubmission ?? {}),
+    ...(providerChatRoomId ? { providerChatRoomId } : {}),
+    ...(submissionId ? { submissionId } : {}),
+    ...(lulaSubmission ? { type: "form_thread" } : {}),
+  }) as ChatMessageContext;
+
+  return {
+    ...message,
+    providerChatRoomId,
+    submissionId,
+    ...(Object.keys(context).length > 0 ? { context } : {}),
+  };
+}
+
+function parseFormSubmissionMessage(message: ChatMessage): ChatFormSubmissionMessage | null {
+  const payload = parseJsonRecord(message.body);
+  if (!payload) return null;
+
+  const metadata = message.metadata;
+  const lulaPayload = isRecord(metadata?.lulaPayload)
+    ? (metadata?.lulaPayload as Record<string, unknown>)
+    : undefined;
+  const isExplicitFormPayload = payload.type === "form_submission";
+  const isReadableSubmissionPayload = isRecord(payload.readable) || isRecord(payload.raw);
+  if (!lulaPayload && !isExplicitFormPayload && !isReadableSubmissionPayload) {
+    return null;
+  }
+
+  const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
+  return {
+    ...message,
+    payload,
+    providerChatRoomId,
+    formId: firstString(lulaPayload?.formId, payload.formId),
+    providerUserId: firstString(lulaPayload?.providerUserId, payload.providerUserId),
+    recordId: firstString(lulaPayload?.recordId, payload.recordId),
+    formVersion:
+      typeof lulaPayload?.formVersion === "number"
+        ? lulaPayload.formVersion
+        : typeof payload.formVersion === "number"
+          ? payload.formVersion
+          : undefined,
+    submittedAt: firstString(lulaPayload?.submittedAt, payload.submittedAt),
+  };
+}
+
+function parseJsonRecord(input: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function removeUndefinedValues<T extends Record<string, unknown>>(input: T): Partial<T> {
+  const output: Partial<T> = {};
+  for (const [key, value] of Object.entries(input) as Array<[keyof T, T[keyof T]]>) {
+    if (value !== undefined) {
+      output[key] = value;
+    }
+  }
+  return output;
 }
 
 function registerXOAuth2OnClient(xmpp: XmppClientLike): void {
