@@ -1,21 +1,21 @@
-# Lula Chat SDK
+# Hubnet Chat SDK
 
-Typed XMPP chat client for React Native and Node services.
+Typed chat client for React Native and Node services.
 
 ```ts
-import { createRoomDirectory, init } from "@lulafi/chat-sdk";
+import { createRoomDirectory, init } from "@hubnet-systems/chat-sdk";
 
 const roomDirectory = createRoomDirectory({
-  currentUserName: "i.user123",
-  jidDomain: "example.com",
-  getOrCreateRoom: ({ userName }) => api.post("/chats/rooms", { userName }),
+  currentUserId: "6a0dce078d45ca01adbdd4f7",
+  xmppDomain: "api.dev.lulafi.co",
+  getOrCreateRoom: ({ userId }) => api.post("/chats/rooms", { userId }),
   getRoom: (roomId) => api.get(`/chats/rooms/${roomId}`),
 });
 
 const chatClient = init({
-  xmppServer: "wss://chat.example.com/xmpp-websocket",
-  userName: "i.user123",
-  JID: "i.user123@example.com",
+  xmppDomain: "api.dev.lulafi.co",
+  userId: "6a0dce078d45ca01adbdd4f7",
+  deviceId: "d0eb68ad2ff10ee7",
   password: "secret",
   resource: "ios-primary-client",
   roomDirectory,
@@ -32,7 +32,7 @@ const {
 } = chatClient;
 
 onChatMessage((message) => {
-  console.log(message.fromJid, message.body);
+  console.log(message.fromDeviceId, message.body);
   markRead(message.roomId!, message.id);
 });
 
@@ -42,7 +42,7 @@ onFormSubmission((message) => {
 
 await connect();
 
-const room = await chatClient.getOrCreateRoom("i.peer456");
+const room = await chatClient.getOrCreateRoom("peer-user-id");
 
 await sendChatMessage(room.roomId, "Hello");
 
@@ -72,13 +72,45 @@ await sendFormSubmission({
 await sendTyping(room.roomId);
 ```
 
+## Connection
+
+`init(config)` derives the transport values from your app values:
+
+```ts
+init({
+  xmppDomain: "api.dev.lulafi.co",
+  userId: "6a0dce078d45ca01adbdd4f7",
+  deviceId: "d0eb68ad2ff10ee7",
+  password: "secret",
+  resource: "ios-primary-client",
+});
+```
+
+`xmppWebSocketPath` is optional. The default is `/chat/websocket`.
+
+The SDK connects to `wss://api.dev.lulafi.co/chat/websocket`.
+
+The SDK builds the XMPP address internally from the user and device:
+
+```txt
+i.6a0dce078d45ca01adbdd4f7.d.d0eb68ad2ff10ee7@api.dev.lulafi.co
+```
+
+Allowed resources:
+
+- `server-client`
+- `ios-primary-client`
+- `android-primary-client`
+- `ios-secondary-client`
+- `android-secondary-client`
+
 ## API
 
 `init(config)` returns:
 
-- `connect()` to open the XMPP stream.
+- `connect()` to open the chat connection.
 - `stop()` to close the stream.
-- `getOrCreateRoom(userName)` to fetch the room your backend owns for that peer.
+- `getOrCreateRoom(userId)` to fetch the room your backend owns for that peer.
 - `onMessage(listener)` for chat messages.
 - `onChatMessage(listener)` for human chat messages.
 - `onFormSubmission(listener)` for structured form submission payloads.
@@ -94,37 +126,39 @@ await sendTyping(room.roomId);
 - `sendTyping(roomId, { isTyping: false })` to send paused at once.
 - `sendDisplayed(roomId, messageId)` or `markRead(roomId, messageId)` for read markers.
 
-The SDK resolves room JIDs inside `sendChatMessage()`, `sendFormSubmission()`, `sendMessage()`, `sendTyping()`, and read markers. Pass `roomDirectory` in `init()` for the normal fanout path.
+The SDK resolves room device IDs inside `sendChatMessage()`, `sendFormSubmission()`, `sendMessage()`, `sendTyping()`, and read markers. Pass `roomDirectory` in `init()` for the normal fanout path.
 
-The SDK remembers room peers after sends or incoming room messages.
+The SDK remembers room peers after sends and incoming room messages.
 
 Fanout treats partial delivery as success. It only throws after every target send fails.
 
 ## Room Directory
 
 ```ts
-import { createRoomDirectory, init } from "@lulafi/chat-sdk";
+import { createRoomDirectory, init } from "@hubnet-systems/chat-sdk";
 
 const roomDirectory = createRoomDirectory({
-  currentUserName,
-  jidDomain: "example.com",
-  getOrCreateRoom: ({ userName }) => api.post("/chats/rooms", { userName }),
+  currentUserId,
+  xmppDomain,
+  getOrCreateRoom: ({ userId }) => api.post("/chats/rooms", { userId }),
   getRoom: (roomId) => api.get(`/chats/rooms/${roomId}`),
 });
 
 const chatClient = init({
-  xmppServer,
-  JID,
+  xmppDomain,
+  userId,
+  deviceId,
   password,
+  resource: "server-client",
   roomDirectory,
 });
 ```
 
-`createRoomDirectory()` reads `roomId`, `peerJid`, `peerJids`, `chatUserId`, `chatUserIds`, and `userMetadata[].chatUserIds` from your room response. The app fetches rooms. The SDK owns fanout.
+`createRoomDirectory()` reads `roomId`, `peerDeviceId`, `peerDeviceIds`, `deviceId`, `deviceIds`, and `userMetadata[].deviceIds` from your room response. It can turn short device tokens into full transport addresses with `xmppDomain` and each room user id.
 
-`resolveRoomJids` still works as a fallback for older call sites. New code should prefer `roomDirectory`.
+`resolveRoomDeviceIds` still works as a fallback for direct room fanout providers. New code should prefer `roomDirectory`.
 
-The SDK client also exposes `getPeerJids(roomId)`. That gives app code one SDK method to ask for the current fanout targets, no matter if they came from cache, incoming messages, or a configured provider.
+The SDK client exposes `getPeerDeviceIds(roomId)`. That gives app code one SDK method to ask for the current fanout targets, no matter if they came from cache, incoming messages, or a configured provider.
 
 ## Chat vs Form Payloads
 
@@ -133,7 +167,7 @@ Use `sendChatMessage()` for human text. It keeps the body as plain text and writ
 ```ts
 await chatClient.sendChatMessage({
   roomId,
-  peerJid,
+  peerDeviceId,
   body: "Thanks for the submission.",
   context: {
     type: "form_thread",
@@ -166,35 +200,30 @@ Password auth:
 
 ```ts
 const chatClient = init({
-  xmppServer: process.env.XMPP_SERVICE_URL,
-  JID: process.env.XMPP_JID,
-  password: process.env.XMPP_PASSWORD,
+  xmppDomain: process.env.CHAT_XMPP_DOMAIN!,
+  userId: process.env.CHAT_USER_ID!,
+  deviceId: process.env.CHAT_DEVICE_ID!,
+  password: process.env.CHAT_PASSWORD!,
   resource: "server-client",
 });
 ```
-
-Allowed resources:
-
-- `server-client`
-- `ios-primary-client`
-- `android-primary-client`
-- `ios-secondary-client`
-- `android-secondary-client`
 
 Token auth:
 
 ```ts
 const chatClient = init({
-  xmppServer,
-  JID,
+  xmppDomain,
+  userId,
+  deviceId,
   accessToken,
   authType: "x-oauth2",
+  resource: "server-client",
 });
 ```
 
 ## Metadata
 
-Without custom encryption, the SDK sends metadata in the existing Lula XMPP extension:
+Without custom encryption, the SDK sends metadata in the existing Lula chat extension:
 
 ```xml
 <lula xmlns="urn:lula:defy:chat:1">...</lula>
@@ -204,15 +233,17 @@ The payload is base64 JSON. Current mobile code already reads this format.
 
 ## Encryption
 
-If you want chat messages encrypted, use the built-in OMEMO helper. Typing indicators, delivery receipts, and read markers stay as normal XMPP control stanzas.
+If you want chat messages encrypted, use the built-in OMEMO helper. Typing indicators, delivery receipts, and read markers stay as normal chat control stanzas.
 
 ```ts
-import { createOmemoEncryption, init, storageBackends } from "@lulafi/chat-sdk";
+import { createOmemoEncryption, init, storageBackends } from "@hubnet-systems/chat-sdk";
 
 const chatClient = init({
-  xmppServer,
-  JID,
+  xmppDomain,
+  userId,
+  deviceId,
   accessToken,
+  resource: "ios-primary-client",
   encryption: createOmemoEncryption({
     storage: storageBackends.indexDb,
   }),
@@ -228,9 +259,11 @@ const storage = storageBackends.createIndexDb({
 });
 
 const chatClient = init({
-  xmppServer,
-  JID,
+  xmppDomain,
+  userId,
+  deviceId,
   accessToken,
+  resource: "ios-primary-client",
   encryption: createOmemoEncryption({ storage }),
 });
 ```
@@ -245,9 +278,11 @@ const storage = {
 };
 
 const chatClient = init({
-  xmppServer,
-  JID,
+  xmppDomain,
+  userId,
+  deviceId,
   password,
+  resource: "server-client",
   encryption: createOmemoEncryption({ storage }),
 });
 ```
@@ -260,11 +295,13 @@ const storage = storageBackends.mongoDb({
 });
 
 const chatClient = init({
-  xmppServer,
-  JID,
+  xmppDomain,
+  userId,
+  deviceId,
   password,
+  resource: "server-client",
   encryption: createOmemoEncryption({ storage }),
 });
 ```
 
-The SDK still owns connection state, fanout, listeners, receipts, typing states, and message IDs.
+The SDK owns connection state, fanout, listeners, receipts, typing states, and message IDs.

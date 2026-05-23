@@ -76,6 +76,7 @@ var DEFAULT_CONNECT_TIMEOUT_MS = 15e3;
 var DEFAULT_IQ_TIMEOUT_MS = 15e3;
 var DEFAULT_TYPING_AUTO_PAUSE_MS = 1e4;
 var DEFAULT_OMEMO_STATE_KEY_PREFIX = "chat_sdk_omemo_state";
+var DEFAULT_XMPP_WEBSOCKET_PATH = "/chat/websocket";
 var XOauth2Mechanism = class {
   name = "X-OAUTH2";
   clientFirst = true;
@@ -124,14 +125,14 @@ function createRoomDirectory(options) {
     return room;
   };
   return {
-    getPeerJids: async (roomId) => {
+    getPeerDeviceIds: async (roomId) => {
       const normalizedRoomId = roomId.trim();
       if (!normalizedRoomId) return [];
       const cached = roomCache.get(normalizedRoomId);
-      if (cached?.peerJids?.length) return cached.peerJids;
+      if (cached?.peerDeviceIds?.length) return cached.peerDeviceIds;
       if (!options.getRoom) return [];
       const room = normalizeChatRoomResponse(await options.getRoom(normalizedRoomId), options);
-      return rememberRoom(room).peerJids ?? [];
+      return rememberRoom(room).peerDeviceIds ?? [];
     },
     getOrCreateRoom: options.getOrCreateRoom ? async (input) => {
       const room = normalizeChatRoomResponse(await options.getOrCreateRoom(input), options);
@@ -150,7 +151,7 @@ var LulaChatClient = class {
   status = "idle";
   connectPromise = null;
   pendingIqMap = /* @__PURE__ */ new Map();
-  onlineJid;
+  onlineDeviceId;
   roomPeers = /* @__PURE__ */ new Map();
   typingAutoPauseTimers = /* @__PURE__ */ new Map();
   constructor(config) {
@@ -174,18 +175,18 @@ var LulaChatClient = class {
     this.typingAutoPauseTimers.clear();
     const current = this.xmpp;
     this.xmpp = null;
-    this.onlineJid = void 0;
+    this.onlineDeviceId = void 0;
     if (current) {
       await current.stop();
     }
     this.setStatus("offline");
   }
-  async getPeerJids(roomId) {
-    return this.resolveRoomJids(roomId);
+  async getPeerDeviceIds(roomId) {
+    return this.resolveRoomDeviceIds(roomId);
   }
-  async getOrCreateRoom(inputOrUserName, metadata) {
-    const input = typeof inputOrUserName === "string" ? { userName: inputOrUserName, metadata } : inputOrUserName;
-    return this.resolveRoomForUserName(input);
+  async getOrCreateRoom(inputOrUserId, metadata) {
+    const input = typeof inputOrUserId === "string" ? { userId: inputOrUserId, metadata } : inputOrUserId;
+    return this.resolveRoomForUserId(input);
   }
   async sendChatMessage(inputOrRoomId, body, options) {
     const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, body: body ?? "" } : inputOrRoomId;
@@ -207,8 +208,8 @@ var LulaChatClient = class {
       targetRoomId: input.targetRoomId ?? providerChatRoomId ?? input.roomId
     });
   }
-  async sendMessage(inputOrToJid, body, options) {
-    const input = typeof inputOrToJid === "string" ? { ...options ?? {}, roomId: inputOrToJid, body: body ?? "" } : inputOrToJid;
+  async sendMessage(inputOrRoomId, body, options) {
+    const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, body: body ?? "" } : inputOrRoomId;
     const messageBody = input.body ?? "";
     if (!messageBody.trim()) throw new Error("chat_body_required");
     await this.connect();
@@ -216,13 +217,13 @@ var LulaChatClient = class {
     const id = input.id || generateMessageId();
     const roomId = input.roomId?.trim();
     const targetRoomId = input.targetRoomId?.trim() || roomId;
-    const targetJids = await this.resolveRoomTargets({
+    const targetDeviceIds = await this.resolveRoomTargets({
       roomId: targetRoomId,
-      explicitJids: collectTargetJids(input)
+      explicitDeviceIds: collectTargetDeviceIds(input)
     });
-    await this.sendToTargets(targetJids, async (toJid) => {
+    await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
       const encodedPayload = await this.encodePayload({
-        toJid,
+        toDeviceId,
         body: messageBody,
         metadata: input.metadata
       });
@@ -235,11 +236,11 @@ var LulaChatClient = class {
         children.push((0, import_client.xml)("request", { xmlns: XMPP_RECEIPTS_NS }));
         children.push((0, import_client.xml)("markable", { xmlns: XMPP_CHAT_MARKERS_NS }));
       }
-      await xmpp.send((0, import_client.xml)("message", { to: toJid, type: "chat", id }, ...children));
+      await xmpp.send((0, import_client.xml)("message", { to: toDeviceId, type: "chat", id }, ...children));
     });
-    this.rememberRoomPeers(roomId, targetJids);
+    this.rememberRoomPeers(roomId, targetDeviceIds);
     if (targetRoomId && targetRoomId !== roomId) {
-      this.rememberRoomPeers(targetRoomId, targetJids);
+      this.rememberRoomPeers(targetRoomId, targetDeviceIds);
     }
     return id;
   }
@@ -248,21 +249,21 @@ var LulaChatClient = class {
     const roomId = input.roomId.trim();
     if (!roomId) throw new Error("chat_room_id_required");
     const isTyping = input.isTyping ?? true;
-    const targetJids = await this.resolveRoomTargets({
+    const targetDeviceIds = await this.resolveRoomTargets({
       roomId,
-      explicitJids: collectTargetJids(input)
+      explicitDeviceIds: collectTargetDeviceIds(input)
     });
-    this.rememberRoomPeers(roomId, targetJids);
+    this.rememberRoomPeers(roomId, targetDeviceIds);
     this.clearTypingAutoPause(roomId);
     await this.connect();
     const children = [];
     children.push((0, import_client.xml)("thread", {}, roomId));
     children.push((0, import_client.xml)(isTyping ? "composing" : "paused", { xmlns: XMPP_CHATSTATES_NS }));
     await this.sendToTargets(
-      targetJids,
-      (toJid) => this.requireXmpp().send(
+      targetDeviceIds,
+      (toDeviceId) => this.requireXmpp().send(
         (0, import_client.xml)("message", {
-          to: toJid,
+          to: toDeviceId,
           type: "chat",
           id: input.id || `typing-${Date.now()}`
         }, ...children)
@@ -277,21 +278,21 @@ var LulaChatClient = class {
     const roomId = input.roomId.trim();
     if (!roomId) throw new Error("chat_room_id_required");
     if (!input.messageId.trim()) throw new Error("chat_message_id_required");
-    const targetJids = await this.resolveRoomTargets({
+    const targetDeviceIds = await this.resolveRoomTargets({
       roomId,
-      explicitJids: collectTargetJids(input)
+      explicitDeviceIds: collectTargetDeviceIds(input)
     });
-    this.rememberRoomPeers(roomId, targetJids);
+    this.rememberRoomPeers(roomId, targetDeviceIds);
     await this.connect();
     const children = [
       (0, import_client.xml)("displayed", { xmlns: XMPP_CHAT_MARKERS_NS, id: input.messageId })
     ];
     children.unshift((0, import_client.xml)("thread", {}, roomId));
     await this.sendToTargets(
-      targetJids,
-      (toJid) => this.requireXmpp().send(
+      targetDeviceIds,
+      (toDeviceId) => this.requireXmpp().send(
         (0, import_client.xml)("message", {
-          to: toJid,
+          to: toDeviceId,
           type: "chat",
           id: input.id || `displayed-${Date.now()}`
         }, ...children)
@@ -327,17 +328,20 @@ var LulaChatClient = class {
   }
   onStatus(listener) {
     const unsubscribe = addListener(this.statusListeners, listener);
-    listener({ status: this.status, jid: this.onlineJid });
+    listener({
+      status: this.status,
+      deviceId: this.onlineDeviceId
+    });
     return unsubscribe;
   }
   getStatus() {
     return this.status;
   }
-  getJid() {
-    return this.onlineJid ?? this.config.jid;
+  getDeviceId() {
+    return this.onlineDeviceId ?? this.config.deviceId;
   }
-  getBareJid() {
-    return normalizeBareJid(this.getJid());
+  getBareDeviceId() {
+    return normalizeBareDeviceId(this.getDeviceId());
   }
   async connectFresh() {
     this.setStatus("connecting");
@@ -374,7 +378,7 @@ var LulaChatClient = class {
     if (!secret) return { username };
     if (this.config.authType === "x-oauth2") {
       return async (authenticate, mechanisms) => {
-        const picked = pickMechanism(mechanisms, ["X-OAUTH2", "PLAIN"]);
+        const picked = pickMechanism(mechanisms, ["X-OAUTH2"]);
         if (!picked) {
           throw new Error(`chat_no_usable_auth_mechanism:${mechanisms.join(",")}`);
         }
@@ -385,9 +389,8 @@ var LulaChatClient = class {
         );
       };
     }
-    return async (authenticate, mechanisms, _fast, entity) => {
-      const secure = entity?.isSecure?.() ?? false;
-      const preferred = secure ? ["SCRAM-SHA-1", "PLAIN", "ANONYMOUS"] : ["SCRAM-SHA-1", "ANONYMOUS"];
+    return async (authenticate, mechanisms, _fast, _entity) => {
+      const preferred = ["SCRAM-SHA-1", "ANONYMOUS"];
       const picked = pickMechanism(mechanisms, preferred);
       if (!picked) {
         throw new Error(`chat_no_usable_auth_mechanism:${mechanisms.join(",")}`);
@@ -401,7 +404,7 @@ var LulaChatClient = class {
   }
   bindXmppEvents(xmpp) {
     xmpp.on("online", async (address) => {
-      this.onlineJid = addressToString(address) ?? this.config.jid;
+      this.onlineDeviceId = addressToString(address) ?? this.config.deviceId;
       this.setStatus("online");
       await xmpp.send((0, import_client.xml)("presence"));
       try {
@@ -412,7 +415,7 @@ var LulaChatClient = class {
     });
     xmpp.on("offline", () => {
       this.setStatus("offline");
-      this.onlineJid = void 0;
+      this.onlineDeviceId = void 0;
       this.rejectPendingIq(new Error("chat_iq_offline"));
     });
     xmpp.on("error", (error) => {
@@ -429,9 +432,10 @@ var LulaChatClient = class {
     this.resolvePendingIq(stanza);
     if (!stanza.is?.("message")) return;
     const attrs = stanza.attrs ?? {};
-    const fromJid = normalizeBareJid(attrs.from) || attrs.from || "";
+    const fromDeviceId = normalizeBareDeviceId(attrs.from) || attrs.from || "";
+    const toDeviceId = attrs.to ? normalizeBareDeviceId(attrs.to) || attrs.to : void 0;
     const roomId = trimToUndefined(stanza.getChildText?.("thread") ?? void 0);
-    this.rememberRoomPeer(roomId, fromJid);
+    this.rememberRoomPeer(roomId, fromDeviceId);
     const receipt = stanza.getChild?.("received", XMPP_RECEIPTS_NS);
     const markerReceived = stanza.getChild?.("received", XMPP_CHAT_MARKERS_NS);
     const displayed = stanza.getChild?.("displayed", XMPP_CHAT_MARKERS_NS);
@@ -439,8 +443,8 @@ var LulaChatClient = class {
     if (receiptId) {
       this.emit(this.deliveryListeners, {
         id: receiptId,
-        fromJid,
-        toJid: attrs.to,
+        fromDeviceId,
+        toDeviceId,
         roomId,
         status: "delivered",
         raw: stanza
@@ -450,8 +454,8 @@ var LulaChatClient = class {
     if (displayed?.attrs?.id) {
       this.emit(this.deliveryListeners, {
         id: displayed.attrs.id,
-        fromJid,
-        toJid: attrs.to,
+        fromDeviceId,
+        toDeviceId,
         roomId,
         status: "read",
         raw: stanza
@@ -463,8 +467,8 @@ var LulaChatClient = class {
       this.emit(this.errorListeners, {
         ...errorEvent,
         id: attrs.id,
-        fromJid,
-        toJid: attrs.to,
+        fromDeviceId,
+        toDeviceId,
         roomId,
         raw: stanza
       });
@@ -474,8 +478,8 @@ var LulaChatClient = class {
     const paused = stanza.getChild?.("paused", XMPP_CHATSTATES_NS);
     if (composing || paused) {
       this.emit(this.typingListeners, {
-        fromJid,
-        toJid: attrs.to,
+        fromDeviceId,
+        toDeviceId,
         roomId,
         isTyping: Boolean(composing),
         raw: stanza
@@ -486,8 +490,8 @@ var LulaChatClient = class {
     if (!body.trim()) return;
     this.emit(this.messageListeners, {
       id: attrs.id || generateMessageId(),
-      fromJid,
-      toJid: attrs.to,
+      fromDeviceId,
+      toDeviceId,
       roomId,
       body,
       timestamp: parseDelayTimestamp(stanza) ?? parseMetadataTimestamp(decoded.metadata) ?? Date.now(),
@@ -495,8 +499,8 @@ var LulaChatClient = class {
       raw: stanza
     });
     const receiptRequest = stanza.getChild?.("request", XMPP_RECEIPTS_NS);
-    if (attrs.id && receiptRequest && fromJid) {
-      await this.sendReceipt({ toJid: fromJid, roomId, messageId: attrs.id });
+    if (attrs.id && receiptRequest && fromDeviceId) {
+      await this.sendReceipt({ toDeviceId: fromDeviceId, roomId, messageId: attrs.id });
     }
   }
   async sendReceipt(input) {
@@ -506,7 +510,7 @@ var LulaChatClient = class {
     if (input.roomId) children.unshift((0, import_client.xml)("thread", {}, input.roomId));
     await this.requireXmpp().send(
       (0, import_client.xml)("message", {
-        to: input.toJid,
+        to: input.toDeviceId,
         type: "chat",
         id: `rcpt-${Date.now()}`
       }, ...children)
@@ -514,42 +518,46 @@ var LulaChatClient = class {
   }
   getEncryptionContext() {
     return {
-      getBareJid: () => this.getBareJid(),
-      getJid: () => this.getJid(),
+      getDeviceId: () => this.getDeviceId(),
+      getBareDeviceId: () => this.getBareDeviceId(),
       sendIq: (input) => this.sendIq(input),
       logger: this.config.logger
     };
   }
-  rememberRoomPeer(roomId, peerJid) {
+  rememberRoomPeer(roomId, peerDeviceId) {
     const normalizedRoomId = roomId?.trim();
-    const normalizedPeerJid = normalizeBareJid(peerJid);
-    if (!normalizedRoomId || !normalizedPeerJid) return;
-    if (normalizedPeerJid === this.getBareJid()) return;
+    const normalizedPeerDeviceId = normalizeBareDeviceId(peerDeviceId);
+    if (!normalizedRoomId || !normalizedPeerDeviceId) return;
+    if (normalizedPeerDeviceId === this.getBareDeviceId()) return;
     const peers = this.roomPeers.get(normalizedRoomId) ?? /* @__PURE__ */ new Set();
-    peers.add(normalizedPeerJid);
+    peers.add(normalizedPeerDeviceId);
     this.roomPeers.set(normalizedRoomId, peers);
   }
-  rememberRoomPeers(roomId, peerJids) {
-    peerJids?.forEach((peerJid) => this.rememberRoomPeer(roomId, peerJid));
+  rememberRoomPeers(roomId, peerDeviceIds) {
+    peerDeviceIds?.forEach((peerDeviceId) => this.rememberRoomPeer(roomId, peerDeviceId));
   }
-  async resolveRoomForUserName(input) {
-    const userName = input.userName.trim();
-    if (!userName) throw new Error("chat_username_required");
+  async resolveRoomForUserId(input) {
+    const userId = input.userId.trim();
+    if (!userId) throw new Error("chat_user_id_required");
     const provider = this.config.roomDirectory?.getOrCreateRoom;
     if (!provider) throw new Error("chat_room_directory_get_or_create_required");
-    const room = await provider({ userName, metadata: input.metadata });
+    const room = await provider({ userId, metadata: input.metadata });
     const normalizedRoomId = room.roomId.trim();
     if (!normalizedRoomId) throw new Error("chat_room_id_required");
-    this.rememberRoomPeers(normalizedRoomId, room.peerJids);
+    this.rememberRoomPeers(normalizedRoomId, room.peerDeviceIds);
     return { ...room, roomId: normalizedRoomId };
   }
   async resolveRoomTargets(input) {
-    const explicit = normalizeJidList(input.explicitJids ?? []);
+    const explicit = normalizeDeviceIdList(input.explicitDeviceIds ?? []);
     if (input.roomId) this.rememberRoomPeers(input.roomId, explicit);
-    const resolverJids = input.roomId ? await this.getPeerJids(input.roomId) : [];
-    const cachedJids = input.roomId ? this.getCachedRoomPeers(input.roomId) : [];
-    const targets = normalizeJidList([...explicit, ...resolverJids, ...cachedJids]).filter(
-      (jid) => jid !== this.getBareJid()
+    const resolverDeviceIds = input.roomId ? await this.getPeerDeviceIds(input.roomId) : [];
+    const cachedDeviceIds = input.roomId ? this.getCachedRoomPeers(input.roomId) : [];
+    const targets = normalizeDeviceIdList([
+      ...explicit,
+      ...resolverDeviceIds,
+      ...cachedDeviceIds
+    ]).filter(
+      (deviceId) => deviceId !== this.getBareDeviceId()
     );
     if (!targets.length) {
       const suffix = input.roomId ? `:${input.roomId}` : "";
@@ -560,24 +568,26 @@ var LulaChatClient = class {
   getCachedRoomPeers(roomId) {
     return Array.from(this.roomPeers.get(roomId.trim()) ?? []);
   }
-  async resolveRoomJids(roomId) {
+  async resolveRoomDeviceIds(roomId) {
     const normalizedRoomId = roomId.trim();
     if (!normalizedRoomId) return [];
-    if (this.config.roomDirectory?.getPeerJids) {
-      const resolved2 = await this.config.roomDirectory.getPeerJids(normalizedRoomId);
-      return normalizeJidList(resolved2);
+    if (this.config.roomDirectory?.getPeerDeviceIds) {
+      const resolved = await this.config.roomDirectory.getPeerDeviceIds(normalizedRoomId);
+      return normalizeDeviceIdList(resolved);
     }
-    if (!this.config.resolveRoomJids) return [];
-    const resolved = await this.config.resolveRoomJids(normalizedRoomId);
-    return normalizeJidList(resolved);
+    if (this.config.resolveRoomDeviceIds) {
+      const resolved = await this.config.resolveRoomDeviceIds(normalizedRoomId);
+      return normalizeDeviceIdList(resolved);
+    }
+    return [];
   }
-  async sendToTargets(targetJids, send) {
-    const targets = normalizeJidList(targetJids);
+  async sendToTargets(targetDeviceIds, send) {
+    const targets = normalizeDeviceIdList(targetDeviceIds);
     if (!targets.length) throw new Error("chat_targets_required");
     const results = await Promise.all(
-      targets.map(async (targetJid) => {
+      targets.map(async (targetDeviceId) => {
         try {
-          await send(targetJid);
+          await send(targetDeviceId);
           return { ok: true };
         } catch (error) {
           return { ok: false, error };
@@ -640,7 +650,11 @@ var LulaChatClient = class {
   }
   setStatus(status, error) {
     this.status = status;
-    this.emit(this.statusListeners, { status, jid: this.onlineJid, error });
+    this.emit(this.statusListeners, {
+      status,
+      deviceId: this.onlineDeviceId,
+      error
+    });
   }
   requireXmpp() {
     if (!this.xmpp) throw new Error("chat_client_not_connected");
@@ -787,7 +801,7 @@ function createOmemoEncryption(options = {}) {
     return base64ToBytes(identityKeyBase64);
   };
   const publishIdentity = async (context) => {
-    const bareJid = context.getBareJid();
+    const bareJid = context.getBareDeviceId();
     if (!bareJid) return;
     const state = await loadOrCreateState(bareJid);
     const existingIds = await fetchDeviceIds(context, bareJid).catch(() => []);
@@ -853,14 +867,14 @@ function createOmemoEncryption(options = {}) {
     });
     publishedBareJid = bareJid;
   };
-  const establishPeerSessions = async (context, toJid) => {
-    const bareJid = context.getBareJid();
+  const establishPeerSessions = async (context, toDeviceId) => {
+    const bareJid = context.getBareDeviceId();
     if (!bareJid) {
       throw new Error("xmpp_omemo_state_missing");
     }
     const state = await loadOrCreateState(bareJid);
     const ownPrivateKey = base64ToBytes(state.identityPrivateKey);
-    const peerDeviceIds = await fetchDeviceIds(context, normalizeBareJid(toJid));
+    const peerDeviceIds = await fetchDeviceIds(context, normalizeBareDeviceId(toDeviceId));
     if (!peerDeviceIds.length) {
       throw new Error("xmpp_omemo_peer_device_not_found");
     }
@@ -869,7 +883,7 @@ function createOmemoEncryption(options = {}) {
       try {
         const peerPublicKey = await fetchIdentityKey(
           context,
-          normalizeBareJid(toJid),
+          normalizeBareDeviceId(toDeviceId),
           peerDeviceId
         );
         sessions.push({
@@ -886,12 +900,12 @@ function createOmemoEncryption(options = {}) {
   };
   return {
     onConnect: async (context) => {
-      const bareJid = context.getBareJid();
+      const bareJid = context.getBareDeviceId();
       if (!bareJid || publishedBareJid === bareJid) return;
       await publishIdentity(context);
     },
     encrypt: async (input, context) => {
-      const bareJid = context.getBareJid();
+      const bareJid = context.getBareDeviceId();
       if (!bareJid) {
         throw new Error("xmpp_omemo_state_missing");
       }
@@ -899,7 +913,7 @@ function createOmemoEncryption(options = {}) {
         await publishIdentity(context);
       }
       const state = await loadOrCreateState(bareJid);
-      const sessions = await establishPeerSessions(context, input.toJid);
+      const sessions = await establishPeerSessions(context, input.toDeviceId);
       const iv = getRandomBytes(12);
       const contentKey = getRandomBytes(OMEMO_AES_KEY_BYTES);
       const plaintext = new TextEncoder().encode(
@@ -950,7 +964,7 @@ function createOmemoEncryption(options = {}) {
     decrypt: async ({ stanza }, context) => {
       const encrypted = stanza.getChild?.("encrypted", OMEMO_NS);
       if (!encrypted) return null;
-      const bareJid = context.getBareJid();
+      const bareJid = context.getBareDeviceId();
       if (!bareJid) return { body: "", metadata: void 0 };
       const state = await loadOrCreateState(bareJid);
       const header = encrypted.getChild?.("header");
@@ -1020,22 +1034,25 @@ function createOmemoEncryption(options = {}) {
   };
 }
 function normalizeConfig(config) {
-  const service = trimToUndefined(config.xmppServer) ?? trimToUndefined(config.service);
-  if (!service) throw new Error("chat_xmpp_server_required");
-  const jid = trimToUndefined(config.JID) ?? trimToUndefined(config.jid);
-  const username = trimToUndefined(config.userName) ?? trimToUndefined(config.username) ?? parseLocalpart(jid);
-  if (!username) throw new Error("chat_username_required");
+  const domain = normalizeXmppDomain(config.xmppDomain);
+  if (!domain) throw new Error("chat_xmpp_domain_required");
+  const userId = normalizeUserIdSegment(config.userId);
+  if (!userId) throw new Error("chat_user_id_required");
+  const localDeviceId = normalizeDeviceIdSegment(config.deviceId);
+  if (!localDeviceId) throw new Error("chat_device_id_required");
+  const username = buildXmppLocalpart(userId, localDeviceId);
+  const deviceId = buildXmppDeviceAddress(userId, localDeviceId, domain);
   return {
-    service,
+    service: buildXmppWebSocketUrl(domain, config.xmppWebSocketPath),
     username,
-    jid,
+    deviceId,
     password: trimToUndefined(config.password) ?? trimToUndefined(config.accessToken) ?? trimToUndefined(config.token),
     authType: config.authType ?? (config.accessToken || config.token ? "x-oauth2" : "password"),
-    domain: trimToUndefined(config.domain) ?? parseDomain(jid),
+    domain,
     resource: normalizeResource(config.resource),
     connectTimeoutMs: config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
     roomDirectory: config.roomDirectory,
-    resolveRoomJids: config.resolveRoomJids,
+    resolveRoomDeviceIds: config.resolveRoomDeviceIds,
     logger: config.logger,
     encryption: config.encryption
   };
@@ -1106,24 +1123,24 @@ function buildFormSubmissionMetadata(input) {
   });
   return metadata;
 }
-function collectTargetJids(input) {
-  return normalizeJidList([
-    input.toJid,
-    input.peerJid,
-    ...input.toJids ?? [],
-    ...input.peerJids ?? []
+function collectTargetDeviceIds(input) {
+  return normalizeDeviceIdList([
+    input.toDeviceId,
+    input.peerDeviceId,
+    ...input.toDeviceIds ?? [],
+    ...input.peerDeviceIds ?? []
   ]);
 }
-function normalizeJidList(values) {
-  const normalized = values.map((value) => normalizeBareJid(value)).filter((value) => value.length > 0);
+function normalizeDeviceIdList(values) {
+  const normalized = values.map((value) => normalizeBareDeviceId(value)).filter((value) => value.length > 0);
   return Array.from(new Set(normalized));
 }
 function pickMessageTargetInput(input) {
   return {
-    toJid: input.toJid,
-    toJids: input.toJids,
-    peerJid: input.peerJid,
-    peerJids: input.peerJids,
+    toDeviceId: input.toDeviceId,
+    toDeviceIds: input.toDeviceIds,
+    peerDeviceId: input.peerDeviceId,
+    peerDeviceIds: input.peerDeviceIds,
     roomId: input.roomId,
     targetRoomId: input.targetRoomId,
     id: input.id,
@@ -1251,18 +1268,41 @@ function generateMessageId() {
 function generateIqId() {
   return `iq-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
-function normalizeBareJid(jid) {
-  return jid?.trim().split("/")[0] ?? "";
+function buildXmppLocalpart(userId, deviceId) {
+  return `i.${userId}.d.${deviceId}`;
 }
-function parseLocalpart(jid) {
-  const bare = normalizeBareJid(jid);
-  const localpart = bare.split("@")[0]?.trim();
-  return localpart || void 0;
+function buildXmppDeviceAddress(userId, deviceId, xmppDomain) {
+  return `${buildXmppLocalpart(userId, deviceId)}@${xmppDomain}`;
 }
-function parseDomain(jid) {
-  const bare = normalizeBareJid(jid);
-  const domain = bare.split("@")[1]?.trim();
-  return domain || void 0;
+function buildXmppWebSocketUrl(xmppDomain, path) {
+  const normalizedPath = normalizeXmppWebSocketPath(path);
+  return `wss://${xmppDomain}${normalizedPath}`;
+}
+function normalizeXmppWebSocketPath(path) {
+  const trimmed = trimToUndefined(path) ?? DEFAULT_XMPP_WEBSOCKET_PATH;
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+function normalizeXmppDomain(domain) {
+  const trimmed = trimToUndefined(domain);
+  if (!trimmed) return void 0;
+  return trimmed.replace(/^wss?:\/\//i, "").replace(/\/.*$/, "").trim();
+}
+function normalizeUserIdSegment(value) {
+  const trimmed = trimToUndefined(value);
+  if (!trimmed) return void 0;
+  const localpart = normalizeBareDeviceId(trimmed).split("@")[0]?.trim();
+  const withoutPrefix = localpart?.replace(/^i\./, "");
+  return withoutPrefix?.replace(/\.d\..*$/, "") || void 0;
+}
+function normalizeDeviceIdSegment(value) {
+  const trimmed = trimToUndefined(value);
+  if (!trimmed) return void 0;
+  const localpart = normalizeBareDeviceId(trimmed).split("@")[0]?.trim();
+  const deviceMarker = localpart?.indexOf(".d.") ?? -1;
+  return deviceMarker >= 0 ? localpart?.slice(deviceMarker + 3) || void 0 : localpart;
+}
+function normalizeBareDeviceId(deviceId) {
+  return deviceId?.trim().split("/")[0] ?? "";
 }
 function trimToUndefined(value) {
   const trimmed = value?.trim();
@@ -1295,11 +1335,11 @@ function normalizeChatRoomResponse(response, options = {}) {
   );
   if (!roomId) throw new Error("chat_room_id_required");
   const id = firstString(roomRecord.id, roomRecord._id);
-  const peerJids = collectPeerJidsFromRoom(roomRecord, options);
+  const peerDeviceIds = collectPeerDeviceIdsFromRoom(roomRecord, options);
   return {
     ...id ? { id } : {},
     roomId,
-    peerJids,
+    peerDeviceIds,
     raw: response
   };
 }
@@ -1309,26 +1349,50 @@ function unwrapRoomRecord(response) {
   if (isRecord(response.room)) return response.room;
   return response;
 }
-function collectPeerJidsFromRoom(room, options) {
+function collectPeerDeviceIdsFromRoom(room, options) {
   const candidates = [];
-  pushStrings(candidates, room.peerJid);
-  pushStrings(candidates, room.peerJids);
-  pushStrings(candidates, room.chatUserId);
-  pushStrings(candidates, room.chatUserIds);
-  const current = normalizeUserName(options.currentUserName);
+  const domain = normalizeXmppDomain(options.xmppDomain);
+  const roomUserId = firstString(
+    room.peerUserId,
+    room.peerAppUserId,
+    room.userId,
+    room.appUserId,
+    room.providerUserId,
+    room.peerProviderUserId
+  );
+  pushDeviceIdCandidates(candidates, room.peerDeviceId, domain, roomUserId);
+  pushDeviceIdCandidates(candidates, room.peerDeviceIds, domain, roomUserId);
+  pushDeviceIdCandidates(candidates, room.deviceId, domain, roomUserId);
+  pushDeviceIdCandidates(candidates, room.deviceIds, domain, roomUserId);
+  pushDeviceIdCandidates(candidates, room.chatUserId, domain, roomUserId);
+  pushDeviceIdCandidates(candidates, room.chatUserIds, domain, roomUserId);
+  const current = normalizeUserName(options.currentUserId);
   const userMetadata = Array.isArray(room.userMetadata) ? room.userMetadata : [];
   for (const entry of userMetadata) {
     if (!isRecord(entry)) continue;
-    const entryNames = collectStringValues(entry.id, entry.chatUserId, entry.chatUserIds).map(
-      normalizeUserName
+    const entryUserId = firstString(
+      entry.id,
+      entry.userId,
+      entry.appUserId,
+      entry.providerUserId
     );
+    const entryNames = collectStringValues(
+      entry.id,
+      entry.userId,
+      entry.appUserId,
+      entry.providerUserId,
+      entry.deviceId,
+      entry.deviceIds,
+      entry.chatUserId,
+      entry.chatUserIds
+    ).map(normalizeUserName);
     if (current && entryNames.includes(current)) continue;
-    pushStrings(candidates, entry.chatUserId);
-    pushStrings(candidates, entry.chatUserIds);
+    pushDeviceIdCandidates(candidates, entry.deviceId, domain, entryUserId);
+    pushDeviceIdCandidates(candidates, entry.deviceIds, domain, entryUserId);
+    pushDeviceIdCandidates(candidates, entry.chatUserId, domain, entryUserId);
+    pushDeviceIdCandidates(candidates, entry.chatUserIds, domain, entryUserId);
   }
-  return normalizeJidList(
-    candidates.map((candidate) => expandJidCandidate(candidate, options.jidDomain)).filter((candidate) => Boolean(candidate))
-  );
+  return normalizeDeviceIdList(candidates);
 }
 function collectStringValues(...values) {
   const strings = [];
@@ -1344,6 +1408,11 @@ function pushStrings(target, value) {
     value.forEach((entry) => pushStrings(target, entry));
   }
 }
+function pushDeviceIdCandidates(target, value, xmppDomain, userId) {
+  const values = [];
+  pushStrings(values, value);
+  values.map((entry) => expandDeviceIdCandidate(entry, xmppDomain, userId)).filter((entry) => Boolean(entry)).forEach((entry) => target.push(entry));
+}
 function firstString(...values) {
   for (const value of values) {
     if (typeof value === "string" && value.trim()) return value.trim();
@@ -1351,16 +1420,22 @@ function firstString(...values) {
   return void 0;
 }
 function normalizeUserName(value) {
-  const normalized = normalizeBareJid(value);
+  const normalized = normalizeBareDeviceId(value);
   if (!normalized) return void 0;
-  return normalized.split("@")[0] || normalized;
+  return normalizeUserIdSegment(normalized) ?? normalized.split("@")[0] ?? normalized;
 }
-function expandJidCandidate(value, jidDomain) {
+function expandDeviceIdCandidate(value, xmppDomain, userId) {
   const trimmed = value.trim();
   if (!trimmed) return void 0;
   if (trimmed.includes("@")) return trimmed;
-  const domain = jidDomain?.trim();
-  return domain ? `${trimmed}@${domain}` : trimmed;
+  const domain = normalizeXmppDomain(xmppDomain);
+  if (!domain) return trimmed;
+  if (trimmed.startsWith("i.") && trimmed.includes(".d.")) return `${trimmed}@${domain}`;
+  const normalizedUserId = normalizeUserIdSegment(userId);
+  if (normalizedUserId) {
+    return buildXmppDeviceAddress(normalizedUserId, normalizeDeviceIdSegment(trimmed) ?? trimmed, domain);
+  }
+  return `${trimmed}@${domain}`;
 }
 function isValidOmemoState(value) {
   if (!isRecord(value)) return false;

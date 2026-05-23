@@ -2,6 +2,7 @@ import { xml } from "@xmpp/client";
 export type Unsubscribe = () => void;
 export type ChatStatus = "idle" | "connecting" | "online" | "offline" | "stopping" | "error";
 export type ChatDeliveryStatus = "delivered" | "read";
+export type DeviceId = string;
 export declare const chatResources: readonly ["server-client", "ios-primary-client", "android-primary-client", "ios-secondary-client", "android-secondary-client"];
 export type ChatResource = (typeof chatResources)[number];
 export type ChatLogger = {
@@ -11,23 +12,23 @@ export type ChatLogger = {
     error?: (message: string, data?: Record<string, unknown>) => void;
 };
 export type ChatRoomLookupInput = {
-    userName: string;
+    userId: string;
     metadata?: Record<string, unknown>;
 };
 export type ChatRoom = {
     id?: string;
     roomId: string;
-    peerJids?: string[];
+    peerDeviceIds?: DeviceId[];
     raw?: unknown;
 };
 export type ChatRoomDirectoryOptions = {
-    currentUserName?: string;
-    jidDomain?: string;
+    currentUserId?: string;
+    xmppDomain?: string;
     getOrCreateRoom?: (input: ChatRoomLookupInput) => Promise<unknown> | unknown;
     getRoom?: (roomId: string) => Promise<unknown> | unknown;
 };
 export type ChatRoomDirectory = {
-    getPeerJids: (roomId: string) => Promise<string[]> | string[];
+    getPeerDeviceIds: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
     getOrCreateRoom?: (input: ChatRoomLookupInput) => Promise<ChatRoom> | ChatRoom;
 };
 export type ChatKeyValueStore = {
@@ -52,29 +53,26 @@ export type MongoDbStorageOptions = {
     updatedAtField?: string;
 };
 export type ChatClientConfig = {
-    xmppServer?: string;
-    service?: string;
-    userName?: string;
-    username?: string;
-    JID?: string;
-    jid?: string;
+    xmppWebSocketPath?: string;
+    xmppDomain: string;
+    userId: string;
+    deviceId: DeviceId;
     password?: string;
     accessToken?: string;
     token?: string;
     authType?: "password" | "x-oauth2";
-    domain?: string;
     resource?: ChatResource;
     autoReconnect?: boolean;
     connectTimeoutMs?: number;
     roomDirectory?: ChatRoomDirectory;
-    resolveRoomJids?: (roomId: string) => Promise<string[]> | string[];
+    resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
     logger?: ChatLogger;
     encryption?: ChatEncryption;
 };
 export type ChatMessage = {
     id: string;
-    fromJid: string;
-    toJid?: string;
+    fromDeviceId: DeviceId;
+    toDeviceId?: DeviceId;
     roomId?: string;
     body: string;
     timestamp: number;
@@ -89,10 +87,10 @@ export type ChatMessageContext = {
     [key: string]: unknown;
 };
 export type ChatMessageInput = {
-    toJid?: string;
-    toJids?: string[];
-    peerJid?: string;
-    peerJids?: string[];
+    toDeviceId?: DeviceId;
+    toDeviceIds?: DeviceId[];
+    peerDeviceId?: DeviceId;
+    peerDeviceIds?: DeviceId[];
     body: string;
     roomId?: string;
     targetRoomId?: string;
@@ -131,10 +129,10 @@ export type ChatFormSubmissionMessage = ChatMessage & {
 };
 export type ChatTypingInput = {
     roomId: string;
-    peerJid?: string;
-    peerJids?: string[];
-    toJid?: string;
-    toJids?: string[];
+    peerDeviceId?: DeviceId;
+    peerDeviceIds?: DeviceId[];
+    toDeviceId?: DeviceId;
+    toDeviceIds?: DeviceId[];
     isTyping?: boolean;
     autoPauseMs?: number;
     id?: string;
@@ -142,31 +140,31 @@ export type ChatTypingInput = {
 export type ChatDisplayedInput = {
     roomId: string;
     messageId: string;
-    peerJid?: string;
-    peerJids?: string[];
-    toJid?: string;
-    toJids?: string[];
+    peerDeviceId?: DeviceId;
+    peerDeviceIds?: DeviceId[];
+    toDeviceId?: DeviceId;
+    toDeviceIds?: DeviceId[];
     id?: string;
 };
 export type ChatTypingEvent = {
-    fromJid: string;
-    toJid?: string;
+    fromDeviceId: DeviceId;
+    toDeviceId?: DeviceId;
     roomId?: string;
     isTyping: boolean;
     raw?: unknown;
 };
 export type ChatDeliveryEvent = {
     id: string;
-    fromJid: string;
-    toJid?: string;
+    fromDeviceId: DeviceId;
+    toDeviceId?: DeviceId;
     roomId?: string;
     status: ChatDeliveryStatus;
     raw?: unknown;
 };
 export type ChatErrorEvent = {
     id?: string;
-    fromJid?: string;
-    toJid?: string;
+    fromDeviceId?: DeviceId;
+    toDeviceId?: DeviceId;
     roomId?: string;
     condition?: string;
     text?: string;
@@ -175,11 +173,11 @@ export type ChatErrorEvent = {
 };
 export type ChatStatusEvent = {
     status: ChatStatus;
-    jid?: string;
+    deviceId?: DeviceId;
     error?: unknown;
 };
 export type ChatEncryptInput = {
-    toJid: string;
+    toDeviceId: DeviceId;
     body: string;
     metadata?: Record<string, unknown>;
 };
@@ -195,8 +193,8 @@ export type ChatDecryptedMessage = {
     metadata?: Record<string, unknown>;
 };
 export type ChatEncryptionContext = {
-    getBareJid: () => string | undefined;
-    getJid: () => string | undefined;
+    getDeviceId: () => DeviceId | undefined;
+    getBareDeviceId: () => DeviceId | undefined;
     sendIq: (input: {
         type: "get" | "set";
         payload: XmppChild;
@@ -218,10 +216,10 @@ export type ChatClient = {
     connect: () => Promise<void>;
     stop: () => Promise<void>;
     getOrCreateRoom: {
-        (userName: string, metadata?: Record<string, unknown>): Promise<ChatRoom>;
+        (userId: string, metadata?: Record<string, unknown>): Promise<ChatRoom>;
         (input: ChatRoomLookupInput): Promise<ChatRoom>;
     };
-    getPeerJids: (roomId: string) => Promise<string[]>;
+    getPeerDeviceIds: (roomId: string) => Promise<DeviceId[]>;
     sendChatMessage: {
         (message: ChatTextMessageInput): Promise<string>;
         (roomId: string, body: string, options?: Omit<ChatTextMessageInput, "roomId" | "body">): Promise<string>;
@@ -251,8 +249,8 @@ export type ChatClient = {
     onError: (listener: (event: ChatErrorEvent) => void) => Unsubscribe;
     onStatus: (listener: (event: ChatStatusEvent) => void) => Unsubscribe;
     getStatus: () => ChatStatus;
-    getJid: () => string | undefined;
-    getBareJid: () => string | undefined;
+    getDeviceId: () => DeviceId | undefined;
+    getBareDeviceId: () => DeviceId | undefined;
 };
 type XmppChild = ReturnType<typeof xml>;
 type XmppElementLike = {
