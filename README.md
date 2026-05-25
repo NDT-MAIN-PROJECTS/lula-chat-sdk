@@ -111,7 +111,7 @@ Allowed resources:
 - `connect()` to open the chat connection.
 - `stop()` to close the stream.
 - `getOrCreateRoom(userId)` to fetch the room your backend owns for that peer.
-- `onMessage(listener)` for chat messages.
+- `onMessage(listener)` for raw chat messages. Deprecated. Prefer `onChatMessage()` or `onFormSubmission()`.
 - `onChatMessage(listener)` for human chat messages.
 - `onFormSubmission(listener)` for structured form submission payloads.
 - `onTyping(listener)` for composing and paused states.

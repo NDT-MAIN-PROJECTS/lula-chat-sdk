@@ -241,6 +241,9 @@ export type ChatClient = {
         (roomId: string, messageId: string, options?: Omit<ChatDisplayedInput, "roomId" | "messageId">): Promise<void>;
         (input: ChatDisplayedInput): Promise<void>;
     };
+    /**
+     * @deprecated Prefer onChatMessage or onFormSubmission for typed message payloads.
+     */
     onMessage: (listener: (message: ChatMessage) => void) => Unsubscribe;
     onChatMessage: (listener: (message: ChatTextMessage) => void) => Unsubscribe;
     onFormSubmission: (listener: (message: ChatFormSubmissionMessage) => void) => Unsubscribe;
