@@ -1,7 +1,7 @@
 {
   "name": "@hubnet-systems/chat-sdk",
   "version": "0.1.10",
-  "description": "Typed XMPP chat client for apps and services.",
+  "description": "Typed XMPP chat client for apps & services.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
