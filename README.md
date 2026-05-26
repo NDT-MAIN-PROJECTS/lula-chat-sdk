@@ -16,6 +16,7 @@ const chatClient = init({
   xmppDomain: "api.dev.lulafi.co",
   userId: "6a0dce078d45ca01adbdd4f7",
   deviceId: "d0eb68ad2ff10ee7",
+  displayName: "Taylor Morgan",
   password: "secret",
   resource: "ios-primary-client",
   roomDirectory,
@@ -81,6 +82,7 @@ init({
   xmppDomain: "api.dev.lulafi.co",
   userId: "6a0dce078d45ca01adbdd4f7",
   deviceId: "d0eb68ad2ff10ee7",
+  displayName: "Taylor Morgan",
   password: "secret",
   resource: "ios-primary-client",
 });
@@ -89,6 +91,8 @@ init({
 `xmppWebSocketPath` is optional. The default is `/chat/websocket`.
 
 The SDK connects to `wss://api.dev.lulafi.co/chat/websocket`.
+
+`displayName` is written into outgoing message metadata as `metadata.displayName`.
 
 The SDK builds the XMPP address internally from the user and device:
 
@@ -172,7 +176,7 @@ await chatClient.sendChatMessage({
   context: {
     type: "form_thread",
     submissionId,
-    senderName: "Agent",
+    displayName: "Agent",
   },
 });
 ```
@@ -230,6 +234,8 @@ Without custom encryption, the SDK sends metadata in the existing Lula chat exte
 ```
 
 The payload is base64 JSON. Current mobile code already reads this format.
+
+The SDK chooses `onChatMessage()` or `onFormSubmission()` from its own metadata and payload parsing.
 
 ## Encryption
 

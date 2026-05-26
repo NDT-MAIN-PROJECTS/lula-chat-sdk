@@ -19,6 +19,8 @@ export type ChatDeliveryStatus = "delivered" | "read";
 
 export type DeviceId = string;
 
+type ChatMessageType = "CHAT_MESSAGE" | "FORM_SUBMISSION";
+
 export const chatResources = [
   "server-client",
   "ios-primary-client",
@@ -92,23 +94,70 @@ export type MongoDbStorageOptions = {
   updatedAtField?: string;
 };
 
-export type ChatClientConfig = {
+export type ChatClientBaseConfig = {
+  /** API key for app access to the chat service. */
+  apiKey: string;
+
+  /** WebSocket path on the chat domain. Defaults to "/chat/websocket". */
   xmppWebSocketPath?: string;
+
+  /** Chat service domain, for example "api.dev.lulafi.co". */
   xmppDomain: string;
+
+  /** Current app user id. The SDK uses it to derive the transport address. */
   userId: string;
+
+  /** Current device id token, for example "d0eb68ad2ff10ee7". */
   deviceId: DeviceId;
-  password?: string;
-  accessToken?: string;
-  token?: string;
-  authType?: "password" | "x-oauth2";
-  resource?: ChatResource;
+
+  /** Display name written to outgoing message metadata. */
+  displayName?: string;
+
+  /** Device resource label, such as "ios-primary-client" or "server-client". */
+  resource: ChatResource;
+
+  /** Reconnect after transient connection loss. */
   autoReconnect?: boolean;
+
+  /** Connection timeout in milliseconds. Defaults to 15000. */
   connectTimeoutMs?: number;
+
+  /** Room lookup provider used to resolve peer devices for fanout. */
   roomDirectory?: ChatRoomDirectory;
+
+  /** Fallback resolver for older room fanout call sites. Prefer roomDirectory. */
   resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
+
+  /** Optional logger for connection, encryption, and stanza errors. */
   logger?: ChatLogger;
-  encryption?: ChatEncryption;
+
+  /** Message encryption adapter. Pass createOmemoEncryption(...) for built-in OMEMO. */
+  encryption: ChatEncryption;
 };
+
+export type ChatPasswordAuthConfig = ChatClientBaseConfig & {
+  /** Password auth is the default when authType is omitted. */
+  authType?: "password";
+
+  /** Password for password auth. Required for the default auth mode. */
+  password: string;
+
+  /** Access tokens are only valid with authType "x-oauth2". */
+  accessToken?: never;
+};
+
+export type ChatXOAuth2Config = ChatClientBaseConfig & {
+  /** Use X-OAUTH2 auth with an access token. */
+  authType: "x-oauth2";
+
+  /** Access token for X-OAUTH2 auth. Required when authType is "x-oauth2". */
+  accessToken: string;
+
+  /** Passwords are only valid with password auth. */
+  password?: never;
+};
+
+export type ChatClientConfig = ChatPasswordAuthConfig | ChatXOAuth2Config;
 
 export type ChatMessage = {
   id: string;
@@ -126,6 +175,7 @@ export type ChatMessageContext = {
   providerChatRoomId?: string;
   submissionId?: string;
   senderName?: string;
+  displayName?: string;
   [key: string]: unknown;
 };
 
@@ -151,6 +201,7 @@ export type ChatTextMessage = ChatMessage & {
   context?: ChatMessageContext;
   providerChatRoomId?: string;
   submissionId?: string;
+  displayName?: string;
 };
 
 export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"> & {
@@ -539,7 +590,10 @@ class LulaChatClient implements ChatClient {
       typeof inputOrRoomId === "string"
         ? { ...(options ?? {}), roomId: inputOrRoomId, body: body ?? "" }
         : inputOrRoomId;
-    const metadata = buildChatMessageMetadata(input);
+    const metadata = buildChatMessageMetadata({
+      ...input,
+      displayName: this.config.displayName,
+    });
     const providerChatRoomId = extractProviderChatRoomId(metadata);
     return this.sendMessage({
       ...input,
@@ -549,7 +603,10 @@ class LulaChatClient implements ChatClient {
   }
 
   public async sendFormSubmission(input: ChatFormSubmissionInput): Promise<string> {
-    const metadata = buildFormSubmissionMetadata(input);
+    const metadata = buildFormSubmissionMetadata({
+      ...input,
+      displayName: this.config.displayName,
+    });
     const providerChatRoomId = extractProviderChatRoomId(metadata);
     return this.sendMessage({
       ...pickMessageTargetInput(input),
@@ -694,7 +751,7 @@ class LulaChatClient implements ChatClient {
 
   public onChatMessage(listener: (message: ChatTextMessage) => void): Unsubscribe {
     return this.onMessage((message) => {
-      if (parseFormSubmissionMessage(message)) return;
+      if (isFormSubmissionMessage(message)) return;
       listener(toChatTextMessage(message));
     });
   }
@@ -1585,6 +1642,7 @@ type NormalizedConfig = {
   service: string;
   username: string;
   deviceId: DeviceId;
+  displayName?: string;
   password?: string;
   authType: "password" | "x-oauth2";
   domain: string;
@@ -1613,11 +1671,12 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
     service: buildXmppWebSocketUrl(domain, config.xmppWebSocketPath),
     username,
     deviceId,
+    displayName: trimToUndefined(config.displayName),
     password:
-      trimToUndefined(config.password) ??
-      trimToUndefined(config.accessToken) ??
-      trimToUndefined(config.token),
-    authType: config.authType ?? (config.accessToken || config.token ? "x-oauth2" : "password"),
+      config.authType === "x-oauth2"
+        ? trimToUndefined(config.accessToken)
+        : trimToUndefined(config.password),
+    authType: config.authType ?? "password",
     domain,
     resource: normalizeResource(config.resource),
     connectTimeoutMs: config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
@@ -1655,12 +1714,35 @@ export function extractSubmissionId(metadata?: Record<string, unknown>): string 
   return firstString(metadata.submissionId, lulaSubmission?.submissionId);
 }
 
+export function extractDisplayName(metadata?: Record<string, unknown>): string | undefined {
+  if (!metadata) return undefined;
+
+  const lulaSubmission = isRecord(metadata.lulaSubmission)
+    ? (metadata.lulaSubmission as Record<string, unknown>)
+    : undefined;
+
+  return firstString(
+    metadata.displayName,
+    metadata.senderDisplayName,
+    lulaSubmission?.displayName,
+    lulaSubmission?.senderName,
+  );
+}
+
+function extractMessageType(metadata?: Record<string, unknown>): ChatMessageType | undefined {
+  const rawType = firstString(metadata?.messageType, metadata?.type);
+  if (rawType === "CHAT_MESSAGE" || rawType === "FORM_SUBMISSION") return rawType;
+  return undefined;
+}
+
 export function buildChatMessageMetadata(input: {
   roomId?: string;
   metadata?: Record<string, unknown>;
   context?: ChatMessageContext;
+  displayName?: string;
 }): Record<string, unknown> | undefined {
   const metadata: Record<string, unknown> = { ...(input.metadata ?? {}) };
+  metadata.messageType = "CHAT_MESSAGE";
   const providerChatRoomId = firstString(
     input.context?.providerChatRoomId,
     extractProviderChatRoomId(metadata),
@@ -1675,11 +1757,22 @@ export function buildChatMessageMetadata(input: {
   }
 
   const context = input.context;
+  const displayName = firstString(
+    metadata.displayName,
+    context?.displayName,
+    context?.senderName,
+    input.displayName,
+  );
+  if (displayName) {
+    metadata.displayName = displayName;
+  }
+
   const shouldWriteSubmissionContext =
     context &&
     (context.type === "form_thread" ||
       typeof context.submissionId === "string" ||
-      typeof context.senderName === "string");
+      typeof context.senderName === "string" ||
+      typeof context.displayName === "string");
 
   if (shouldWriteSubmissionContext) {
     const existing = isRecord(metadata.lulaSubmission)
@@ -1689,6 +1782,7 @@ export function buildChatMessageMetadata(input: {
     metadata.lulaSubmission = removeUndefinedValues({
       ...existing,
       ...rest,
+      ...(displayName ? { displayName } : {}),
       ...(providerChatRoomId ? { providerChatRoomId } : {}),
     });
   }
@@ -1707,9 +1801,10 @@ export function buildFormSubmissionMetadata(
     | "formVersion"
     | "providerChatRoomId"
     | "submittedAt"
-  >,
+  > & { displayName?: string },
 ): Record<string, unknown> {
   const metadata: Record<string, unknown> = { ...(input.metadata ?? {}) };
+  metadata.messageType = "FORM_SUBMISSION";
   const providerChatRoomId = firstString(
     input.providerChatRoomId,
     extractProviderChatRoomId(metadata),
@@ -1723,6 +1818,10 @@ export function buildFormSubmissionMetadata(
   }
   if (typeof metadata.sentAtMs !== "number") {
     metadata.sentAtMs = Date.now();
+  }
+  const displayName = firstString(metadata.displayName, input.displayName);
+  if (displayName) {
+    metadata.displayName = displayName;
   }
 
   metadata.lulaPayload = removeUndefinedValues({
@@ -1781,6 +1880,7 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
   const metadata = message.metadata;
   const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
   const submissionId = extractSubmissionId(metadata);
+  const displayName = extractDisplayName(metadata);
   const lulaSubmission = isRecord(metadata?.lulaSubmission)
     ? (metadata?.lulaSubmission as Record<string, unknown>)
     : undefined;
@@ -1788,6 +1888,7 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
     ...(lulaSubmission ?? {}),
     ...(providerChatRoomId ? { providerChatRoomId } : {}),
     ...(submissionId ? { submissionId } : {}),
+    ...(displayName ? { displayName } : {}),
     ...(lulaSubmission ? { type: "form_thread" } : {}),
   }) as ChatMessageContext;
 
@@ -1795,8 +1896,15 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
     ...message,
     providerChatRoomId,
     submissionId,
+    ...(displayName ? { displayName } : {}),
     ...(Object.keys(context).length > 0 ? { context } : {}),
   };
+}
+
+function isFormSubmissionMessage(message: ChatMessage): boolean {
+  const metadataType = extractMessageType(message.metadata);
+  if (metadataType === "FORM_SUBMISSION") return true;
+  return Boolean(parseFormSubmissionMessage(message));
 }
 
 function parseFormSubmissionMessage(message: ChatMessage): ChatFormSubmissionMessage | null {
@@ -1804,12 +1912,18 @@ function parseFormSubmissionMessage(message: ChatMessage): ChatFormSubmissionMes
   if (!payload) return null;
 
   const metadata = message.metadata;
+  const metadataType = extractMessageType(metadata);
   const lulaPayload = isRecord(metadata?.lulaPayload)
     ? (metadata?.lulaPayload as Record<string, unknown>)
     : undefined;
   const isExplicitFormPayload = payload.type === "form_submission";
   const isReadableSubmissionPayload = isRecord(payload.readable) || isRecord(payload.raw);
-  if (!lulaPayload && !isExplicitFormPayload && !isReadableSubmissionPayload) {
+  if (
+    metadataType !== "FORM_SUBMISSION" &&
+    !lulaPayload &&
+    !isExplicitFormPayload &&
+    !isReadableSubmissionPayload
+  ) {
     return null;
   }
 

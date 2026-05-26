@@ -52,23 +52,51 @@ export type MongoDbStorageOptions = {
     valueField?: string;
     updatedAtField?: string;
 };
-export type ChatClientConfig = {
+export type ChatClientBaseConfig = {
+    /** API key for app access to the chat service. */
+    apiKey: string;
+    /** WebSocket path on the chat domain. Defaults to "/chat/websocket". */
     xmppWebSocketPath?: string;
+    /** Chat service domain, for example "api.dev.lulafi.co". */
     xmppDomain: string;
+    /** Current app user id. The SDK uses it to derive the transport address. */
     userId: string;
+    /** Current device id token, for example "d0eb68ad2ff10ee7". */
     deviceId: DeviceId;
-    password?: string;
-    accessToken?: string;
-    token?: string;
-    authType?: "password" | "x-oauth2";
-    resource?: ChatResource;
+    /** Display name written to outgoing message metadata. */
+    displayName?: string;
+    /** Device resource label, such as "ios-primary-client" or "server-client". */
+    resource: ChatResource;
+    /** Reconnect after transient connection loss. */
     autoReconnect?: boolean;
+    /** Connection timeout in milliseconds. Defaults to 15000. */
     connectTimeoutMs?: number;
+    /** Room lookup provider used to resolve peer devices for fanout. */
     roomDirectory?: ChatRoomDirectory;
+    /** Fallback resolver for older room fanout call sites. Prefer roomDirectory. */
     resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
+    /** Optional logger for connection, encryption, and stanza errors. */
     logger?: ChatLogger;
-    encryption?: ChatEncryption;
+    /** Message encryption adapter. Pass createOmemoEncryption(...) for built-in OMEMO. */
+    encryption: ChatEncryption;
 };
+export type ChatPasswordAuthConfig = ChatClientBaseConfig & {
+    /** Password auth is the default when authType is omitted. */
+    authType?: "password";
+    /** Password for password auth. Required for the default auth mode. */
+    password: string;
+    /** Access tokens are only valid with authType "x-oauth2". */
+    accessToken?: never;
+};
+export type ChatXOAuth2Config = ChatClientBaseConfig & {
+    /** Use X-OAUTH2 auth with an access token. */
+    authType: "x-oauth2";
+    /** Access token for X-OAUTH2 auth. Required when authType is "x-oauth2". */
+    accessToken: string;
+    /** Passwords are only valid with password auth. */
+    password?: never;
+};
+export type ChatClientConfig = ChatPasswordAuthConfig | ChatXOAuth2Config;
 export type ChatMessage = {
     id: string;
     fromDeviceId: DeviceId;
@@ -84,6 +112,7 @@ export type ChatMessageContext = {
     providerChatRoomId?: string;
     submissionId?: string;
     senderName?: string;
+    displayName?: string;
     [key: string]: unknown;
 };
 export type ChatMessageInput = {
@@ -106,6 +135,7 @@ export type ChatTextMessage = ChatMessage & {
     context?: ChatMessageContext;
     providerChatRoomId?: string;
     submissionId?: string;
+    displayName?: string;
 };
 export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"> & {
     payload: Record<string, unknown>;
@@ -271,12 +301,16 @@ export declare function createRoomDirectory(options: ChatRoomDirectoryOptions): 
 export declare function createOmemoEncryption(options?: OmemoEncryptionOptions): ChatEncryption;
 export declare function extractProviderChatRoomId(metadata?: Record<string, unknown>): string | undefined;
 export declare function extractSubmissionId(metadata?: Record<string, unknown>): string | undefined;
+export declare function extractDisplayName(metadata?: Record<string, unknown>): string | undefined;
 export declare function buildChatMessageMetadata(input: {
     roomId?: string;
     metadata?: Record<string, unknown>;
     context?: ChatMessageContext;
+    displayName?: string;
 }): Record<string, unknown> | undefined;
-export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerChatRoomId" | "submittedAt">): Record<string, unknown>;
+export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerChatRoomId" | "submittedAt"> & {
+    displayName?: string;
+}): Record<string, unknown>;
 export declare function createMemoryStorageBackend(): ChatKeyValueStore;
 export declare function createIndexDbStorageBackend(options?: IndexDbStorageOptions): ChatKeyValueStore;
 export declare function createMongoDbStorageBackend(options: MongoDbStorageOptions): ChatKeyValueStore;
