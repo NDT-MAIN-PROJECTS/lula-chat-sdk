@@ -112,7 +112,6 @@ export type ChatMessage = {
     raw?: unknown;
 };
 export type ChatMessageContext = {
-    type?: "direct" | "form_thread" | string;
     providerChatRoomId?: string;
     submissionId?: string;
     senderName?: string;
@@ -278,6 +277,9 @@ export type ChatClient = {
         (roomId: string, body: string, options?: Omit<ChatTextMessageInput, "roomId" | "body">): Promise<string>;
     };
     sendFormSubmission: (message: ChatFormSubmissionInput) => Promise<string>;
+    /**
+     * @deprecated Prefer sendChatMessage or sendFormSubmission for typed payloads.
+     */
     sendMessage: {
         (message: ChatMessageInput): Promise<string>;
         (roomId: string, body: string, options?: Omit<ChatMessageInput, "roomId" | "body">): Promise<string>;
@@ -285,10 +287,6 @@ export type ChatClient = {
     sendTyping: {
         (roomId: string, options?: Omit<ChatTypingInput, "roomId">): Promise<void>;
         (input: ChatTypingInput): Promise<void>;
-    };
-    sendDisplayed: {
-        (roomId: string, messageId: string, options?: Omit<ChatDisplayedInput, "roomId" | "messageId">): Promise<void>;
-        (input: ChatDisplayedInput): Promise<void>;
     };
     markRead: {
         (roomId: string, messageId: string, options?: Omit<ChatDisplayedInput, "roomId" | "messageId">): Promise<void>;
@@ -308,9 +306,9 @@ export type ChatClient = {
     getDeviceId: () => DeviceId | undefined;
     getBareDeviceId: () => DeviceId | undefined;
     getAddress: () => DeviceId;
-    getChatAddress: () => ChatAddress;
+    getChatAddressObject: () => ChatAddress;
     getDomain: () => string;
-    getUserName: () => string;
+    getUserId: () => string;
 };
 type XmppChild = ReturnType<typeof xml>;
 type XmppElementLike = {

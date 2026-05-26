@@ -30,10 +30,10 @@ const {
   sendFormSubmission,
   sendTyping,
   markRead,
-  getChatAddress,
+  getChatAddressObject,
 } = chatClient;
 
-const ownAddress = getChatAddress();
+const ownAddress = getChatAddressObject();
 
 onChatMessage((message) => {
   console.log(message.fromUserId, message.fromDeviceId, message.body);
@@ -54,9 +54,8 @@ await sendChatMessage({
   roomId: room.roomId,
   body: "Hello again",
   context: {
-    type: "form_thread",
     submissionId: "submission-123",
-    senderName: "Agent",
+    displayName: "Agent",
   },
 });
 
@@ -97,12 +96,6 @@ The SDK connects to `wss://api.dev.lulafi.co/chat/websocket`.
 
 `displayName` is written into outgoing message metadata as `metadata.displayName`.
 
-The SDK builds the XMPP address internally from the user and device:
-
-```txt
-i.6a0dce078d45ca01adbdd4f7.d.d0eb68ad2ff10ee7@api.dev.lulafi.co
-```
-
 Allowed resources:
 
 - `server-client`
@@ -126,18 +119,17 @@ Allowed resources:
 - `onError(listener)` for stanza and runtime errors.
 - `onStatus(listener)` for connection state.
 - `getAddress()` for the current bare chat address.
-- `getChatAddress()` for the current chat address, user id, device id, localpart, and domain.
+- `getChatAddressObject()` for the current chat address, user id, device id, localpart, and domain.
 - `getDomain()` for the normalized chat domain.
-- `getUserName()` for the derived transport username.
+- `getUserId()` for the current app user id.
 - `sendChatMessage({ roomId, body })` to send human chat text.
 - `sendFormSubmission({ roomId, payload })` to send a JSON form submission payload.
-- `sendMessage({ roomId, body })` to send a chat message.
-- `sendMessage(roomId, body)` for the same room-first path.
+- `sendMessage({ roomId, body })` for raw messages. Deprecated. Prefer `sendChatMessage()` or `sendFormSubmission()`.
 - `sendTyping(roomId)` to send composing. The SDK sends paused after 10 seconds.
 - `sendTyping(roomId, { isTyping: false })` to send paused at once.
-- `sendDisplayed(roomId, messageId)` or `markRead(roomId, messageId)` for read markers.
+- `markRead(roomId, messageId)` for read markers.
 
-The SDK resolves room device IDs inside `sendChatMessage()`, `sendFormSubmission()`, `sendMessage()`, `sendTyping()`, and read markers. Pass `roomDirectory` in `init()` for the normal fanout path.
+The SDK resolves room device IDs inside sends, typing events, and read markers. Pass `roomDirectory` in `init()` for the normal fanout path.
 
 The SDK remembers room peers after sends and incoming room messages.
 
@@ -169,7 +161,7 @@ const chatClient = init({
 
 `createRoomDirectory()` reads `roomId`, `peerDeviceId`, `peerDeviceIds`, `deviceId`, `deviceIds`, and `userMetadata[].deviceIds` from your room response. It can turn short device tokens into full transport addresses with `xmppDomain` and each room user id.
 
-`resolveRoomDeviceIds` still works as a fallback for direct room fanout providers. New code should prefer `roomDirectory`.
+`resolveRoomDeviceIds` still works as a fallback room fanout provider. New code should prefer `roomDirectory`.
 
 The SDK client exposes `getPeerDeviceIds(roomId)`. That gives app code one SDK method to ask for the current fanout targets, no matter if they came from cache, incoming messages, or a configured provider.
 
@@ -183,7 +175,6 @@ await chatClient.sendChatMessage({
   peerDeviceId,
   body: "Thanks for the submission.",
   context: {
-    type: "form_thread",
     submissionId,
     displayName: "Agent",
   },
@@ -205,7 +196,7 @@ await chatClient.sendFormSubmission({
 });
 ```
 
-`sendMessage()` remains available as the lower-level escape hatch.
+`sendMessage()` remains available as the lower-level escape hatch, but new app code should use `sendChatMessage()` or `sendFormSubmission()`.
 
 ## Auth
 

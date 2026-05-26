@@ -281,7 +281,7 @@ var LulaChatClient = class {
       this.scheduleTypingAutoPause(roomId, input.autoPauseMs ?? DEFAULT_TYPING_AUTO_PAUSE_MS);
     }
   }
-  async sendDisplayed(inputOrRoomId, messageId, options) {
+  async markRead(inputOrRoomId, messageId, options) {
     const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, messageId: messageId ?? "" } : inputOrRoomId;
     const roomId = input.roomId.trim();
     if (!roomId) throw new Error("chat_room_id_required");
@@ -306,9 +306,6 @@ var LulaChatClient = class {
         }, ...children)
       )
     );
-  }
-  markRead(inputOrRoomId, messageId, options) {
-    return typeof inputOrRoomId === "string" ? this.sendDisplayed(inputOrRoomId, messageId ?? "", options) : this.sendDisplayed(inputOrRoomId);
   }
   onMessage(listener) {
     return addListener(this.messageListeners, listener);
@@ -352,9 +349,9 @@ var LulaChatClient = class {
     return normalizeBareDeviceId(this.getDeviceId());
   }
   getAddress() {
-    return this.getChatAddress().address;
+    return this.getChatAddressObject().address;
   }
-  getChatAddress() {
+  getChatAddressObject() {
     const raw = this.getDeviceId() ?? this.config.deviceId;
     return {
       raw,
@@ -368,8 +365,8 @@ var LulaChatClient = class {
   getDomain() {
     return this.config.domain;
   }
-  getUserName() {
-    return this.config.username;
+  getUserId() {
+    return this.config.userId;
   }
   async connectFresh() {
     this.setStatus("connecting");
@@ -1170,10 +1167,10 @@ function buildChatMessageMetadata(input) {
   if (displayName) {
     metadata.displayName = displayName;
   }
-  const shouldWriteSubmissionContext = context && (context.type === "form_thread" || typeof context.submissionId === "string" || typeof context.senderName === "string" || typeof context.displayName === "string");
+  const shouldWriteSubmissionContext = context && (typeof context.submissionId === "string" || typeof context.senderName === "string" || typeof context.displayName === "string");
   if (shouldWriteSubmissionContext) {
     const existing = isRecord(metadata.lulaSubmission) ? metadata.lulaSubmission : {};
-    const { providerChatRoomId: _providerChatRoomId, type: _type, ...rest } = context;
+    const { providerChatRoomId: _providerChatRoomId, ...rest } = context;
     metadata.lulaSubmission = removeUndefinedValues({
       ...existing,
       ...rest,
@@ -1246,8 +1243,7 @@ function toChatTextMessage(message) {
     ...lulaSubmission ?? {},
     ...providerChatRoomId ? { providerChatRoomId } : {},
     ...submissionId ? { submissionId } : {},
-    ...displayName ? { displayName } : {},
-    ...lulaSubmission ? { type: "form_thread" } : {}
+    ...displayName ? { displayName } : {}
   });
   return {
     ...message,

@@ -176,7 +176,6 @@ export type ChatMessage = {
 };
 
 export type ChatMessageContext = {
-  type?: "direct" | "form_thread" | string;
   providerChatRoomId?: string;
   submissionId?: string;
   senderName?: string;
@@ -373,6 +372,9 @@ export type ChatClient = {
     ): Promise<string>;
   };
   sendFormSubmission: (message: ChatFormSubmissionInput) => Promise<string>;
+  /**
+   * @deprecated Prefer sendChatMessage or sendFormSubmission for typed payloads.
+   */
   sendMessage: {
     (message: ChatMessageInput): Promise<string>;
     (
@@ -384,10 +386,6 @@ export type ChatClient = {
   sendTyping: {
     (roomId: string, options?: Omit<ChatTypingInput, "roomId">): Promise<void>;
     (input: ChatTypingInput): Promise<void>;
-  };
-  sendDisplayed: {
-    (roomId: string, messageId: string, options?: Omit<ChatDisplayedInput, "roomId" | "messageId">): Promise<void>;
-    (input: ChatDisplayedInput): Promise<void>;
   };
   markRead: {
     (roomId: string, messageId: string, options?: Omit<ChatDisplayedInput, "roomId" | "messageId">): Promise<void>;
@@ -407,9 +405,9 @@ export type ChatClient = {
   getDeviceId: () => DeviceId | undefined;
   getBareDeviceId: () => DeviceId | undefined;
   getAddress: () => DeviceId;
-  getChatAddress: () => ChatAddress;
+  getChatAddressObject: () => ChatAddress;
   getDomain: () => string;
-  getUserName: () => string;
+  getUserId: () => string;
 };
 
 type XmppClientLike = ReturnType<typeof createXmppClient>;
@@ -732,7 +730,7 @@ class LulaChatClient implements ChatClient {
     }
   }
 
-  public async sendDisplayed(
+  public async markRead(
     inputOrRoomId: ChatDisplayedInput | string,
     messageId?: string,
     options?: Omit<ChatDisplayedInput, "roomId" | "messageId">,
@@ -764,16 +762,6 @@ class LulaChatClient implements ChatClient {
         }, ...children),
       ),
     );
-  }
-
-  public markRead(
-    inputOrRoomId: ChatDisplayedInput | string,
-    messageId?: string,
-    options?: Omit<ChatDisplayedInput, "roomId" | "messageId">,
-  ): Promise<void> {
-    return typeof inputOrRoomId === "string"
-      ? this.sendDisplayed(inputOrRoomId, messageId ?? "", options)
-      : this.sendDisplayed(inputOrRoomId);
   }
 
   public onMessage(listener: (message: ChatMessage) => void): Unsubscribe {
@@ -828,10 +816,10 @@ class LulaChatClient implements ChatClient {
   }
 
   public getAddress(): DeviceId {
-    return this.getChatAddress().address;
+    return this.getChatAddressObject().address;
   }
 
-  public getChatAddress(): ChatAddress {
+  public getChatAddressObject(): ChatAddress {
     const raw = this.getDeviceId() ?? this.config.deviceId;
     return {
       raw,
@@ -847,8 +835,8 @@ class LulaChatClient implements ChatClient {
     return this.config.domain;
   }
 
-  public getUserName(): string {
-    return this.config.username;
+  public getUserId(): string {
+    return this.config.userId;
   }
 
   private async connectFresh(): Promise<void> {
@@ -1864,8 +1852,7 @@ export function buildChatMessageMetadata(input: {
 
   const shouldWriteSubmissionContext =
     context &&
-    (context.type === "form_thread" ||
-      typeof context.submissionId === "string" ||
+    (typeof context.submissionId === "string" ||
       typeof context.senderName === "string" ||
       typeof context.displayName === "string");
 
@@ -1873,7 +1860,7 @@ export function buildChatMessageMetadata(input: {
     const existing = isRecord(metadata.lulaSubmission)
       ? (metadata.lulaSubmission as Record<string, unknown>)
       : {};
-    const { providerChatRoomId: _providerChatRoomId, type: _type, ...rest } = context;
+    const { providerChatRoomId: _providerChatRoomId, ...rest } = context;
     metadata.lulaSubmission = removeUndefinedValues({
       ...existing,
       ...rest,
@@ -1983,7 +1970,6 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
     ...(providerChatRoomId ? { providerChatRoomId } : {}),
     ...(submissionId ? { submissionId } : {}),
     ...(displayName ? { displayName } : {}),
-    ...(lulaSubmission ? { type: "form_thread" } : {}),
   }) as ChatMessageContext;
 
   return {
