@@ -25,11 +25,14 @@ const chatClient = init({
 const {
   connect,
   onChatMessage,
+  onAttachmentMessage,
   onFormSubmission,
   sendChatMessage,
+  sendAttachment,
   sendFormSubmission,
   sendTyping,
   markRead,
+  resolveAttachment,
   getChatAddressObject,
 } = chatClient;
 
@@ -42,6 +45,10 @@ onChatMessage((message) => {
 
 onFormSubmission((message) => {
   console.log(message.formId, message.payload);
+});
+
+onAttachmentMessage((message) => {
+  console.log(message.attachments[0]?.name);
 });
 
 await connect();
@@ -70,6 +77,13 @@ await sendFormSubmission({
     },
   },
   formId: "form-123",
+});
+
+await sendAttachment(room.roomId, {
+  uri: "file:///tmp/report.pdf",
+  name: "report.pdf",
+  mimeType: "application/pdf",
+  size: 1024,
 });
 
 await sendTyping(room.roomId);
@@ -113,6 +127,7 @@ Allowed resources:
 - `getOrCreateRoom(userId)` to fetch the room your backend owns for that peer.
 - `onMessage(listener)` for raw chat messages. Deprecated. Prefer `onChatMessage()` or `onFormSubmission()`.
 - `onChatMessage(listener)` for human chat messages.
+- `onAttachmentMessage(listener)` for attachment messages.
 - `onFormSubmission(listener)` for structured form submission payloads.
 - `onTyping(listener)` for composing and paused states.
 - `onDelivery(listener)` for delivered and read events.
@@ -123,13 +138,16 @@ Allowed resources:
 - `getDomain()` for the normalized chat domain.
 - `getUserId()` for the current app user id.
 - `sendChatMessage({ roomId, body })` to send human chat text.
+- `uploadAttachment(roomId, attachment)` to upload a file or image through your attachment adapter.
+- `sendAttachment(roomId, attachment)` to send an uploaded attachment into a room.
 - `sendFormSubmission({ roomId, payload })` to send a JSON form submission payload.
 - `sendMessage({ roomId, body })` for raw messages. Deprecated. Prefer `sendChatMessage()` or `sendFormSubmission()`.
 - `sendTyping(roomId)` to send composing. The SDK sends paused after 10 seconds.
 - `sendTyping(roomId, { isTyping: false })` to send paused at once.
 - `markRead(roomId, messageId)` for read markers.
+- `resolveAttachment(attachment)` to turn an attachment into a local or remote source string.
 
-The SDK resolves room device IDs inside sends, typing events, and read markers. Pass `roomDirectory` in `init()` for the normal fanout path.
+The SDK resolves room device IDs inside sends, attachments, typing events, and read markers. Pass `roomDirectory` in `init()` for the normal fanout path.
 
 The SDK remembers room peers after sends and incoming room messages.
 
@@ -159,7 +177,7 @@ const chatClient = init({
 });
 ```
 
-`createRoomDirectory()` reads `roomId`, `peerDeviceId`, `peerDeviceIds`, `deviceId`, `deviceIds`, and `userMetadata[].deviceIds` from your room response. It can turn short device tokens into full transport addresses with `xmppDomain` and each room user id.
+`createRoomDirectory()` reads `roomId`, `peerDeviceId`, `peerDeviceIds`, `deviceId`, `deviceIds`, and `userMetadata[].deviceIds` from your room response. It can turn short device tokens into full transport addresses with `xmppDomain` and each room user id. It uses the current user metadata entry to add your linked devices into room fanout and leaves the current device out at send time.
 
 `resolveRoomDeviceIds` still works as a fallback room fanout provider. New code should prefer `roomDirectory`.
 
@@ -197,6 +215,12 @@ await chatClient.sendFormSubmission({
 ```
 
 `sendMessage()` remains available as the lower-level escape hatch, but new app code should use `sendChatMessage()` or `sendFormSubmission()`.
+
+## Attachments
+
+Pass an `attachmentService` in `init()` to upload and resolve room attachments. The SDK asks that adapter to upload a file, then carries the returned attachment object inside encrypted chat payloads and Lula fallback payloads.
+
+If you use an XMPP upload service, the SDK can request upload slots for the adapter through `context.requestSlot(...)`.
 
 ## Auth
 

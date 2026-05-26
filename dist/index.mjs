@@ -16,6 +16,7 @@ var XMPP_CHAT_NS = "urn:lula:defy:chat:1";
 var XMPP_RECEIPTS_NS = "urn:xmpp:receipts";
 var XMPP_CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0";
 var XMPP_CHATSTATES_NS = "http://jabber.org/protocol/chatstates";
+var XMPP_HTTP_UPLOAD_NS = "urn:xmpp:http:upload:0";
 var OMEMO_NS = "eu.siacs.conversations.axolotl";
 var OMEMO_DEVICELIST_NODE = "eu.siacs.conversations.axolotl.devicelist";
 var OMEMO_BUNDLE_NODE_PREFIX = "eu.siacs.conversations.axolotl.bundles:";
@@ -83,10 +84,14 @@ function createRoomDirectory(options) {
       const normalizedRoomId = roomId.trim();
       if (!normalizedRoomId) return [];
       const cached = roomCache.get(normalizedRoomId);
-      if (cached?.peerDeviceIds?.length) return cached.peerDeviceIds;
+      const cachedDeviceIds = normalizeDeviceIdList([
+        ...cached?.peerDeviceIds ?? [],
+        ...cached?.ownDeviceIds ?? []
+      ]);
+      if (cachedDeviceIds.length) return cachedDeviceIds;
       if (!options.getRoom) return [];
       const room = normalizeChatRoomResponse(await options.getRoom(normalizedRoomId), options);
-      return rememberRoom(room).peerDeviceIds ?? [];
+      return deriveFanoutDeviceIds(room);
     },
     getOrCreateRoom: options.getOrCreateRoom ? async (input) => {
       const room = normalizeChatRoomResponse(await options.getOrCreateRoom(input), options);
@@ -168,10 +173,52 @@ var LulaChatClient = class {
       targetRoomId: input.targetRoomId ?? providerChatRoomId ?? input.roomId
     });
   }
+  async uploadAttachment(inputOrRoomId, attachment) {
+    const input = typeof inputOrRoomId === "string" ? { roomId: inputOrRoomId, attachment } : inputOrRoomId;
+    const roomId = input.roomId.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+    if (!input.attachment) throw new Error("chat_attachment_required");
+    if (!this.config.attachmentService?.upload) {
+      throw new Error("chat_attachment_service_required");
+    }
+    await this.connect();
+    const uploaded = await this.config.attachmentService.upload(
+      input.attachment,
+      this.getAttachmentUploadContext(roomId)
+    );
+    return normalizeRequiredAttachment(uploaded);
+  }
+  async sendAttachment(inputOrRoomId, attachment, options) {
+    const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, attachment } : inputOrRoomId;
+    const roomId = input.roomId?.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+    const uploaded = await this.uploadAttachment({ roomId, attachment: input.attachment });
+    const metadata = buildChatMessageMetadata({
+      ...input,
+      roomId,
+      metadata: {
+        ...input.metadata ?? {},
+        attachment: true,
+        ...uploaded.mimeType ? { mimeType: uploaded.mimeType } : {},
+        ...typeof uploaded.size === "number" ? { size: uploaded.size } : {}
+      },
+      displayName: this.config.displayName
+    });
+    const providerChatRoomId = extractProviderChatRoomId(metadata);
+    return this.sendMessage({
+      ...input,
+      roomId,
+      body: input.body ?? "",
+      attachments: [uploaded],
+      metadata,
+      targetRoomId: input.targetRoomId ?? providerChatRoomId ?? roomId
+    });
+  }
   async sendMessage(inputOrRoomId, body, options) {
     const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, body: body ?? "" } : inputOrRoomId;
     const messageBody = input.body ?? "";
-    if (!messageBody.trim()) throw new Error("chat_body_required");
+    const attachments = normalizeAttachmentPayload(input.attachments);
+    if (!messageBody.trim() && !attachments?.length) throw new Error("chat_body_required");
     const metadata = normalizeMessageMetadata(input.metadata, "CHAT_MESSAGE");
     await this.connect();
     const xmpp = this.requireXmpp();
@@ -186,7 +233,8 @@ var LulaChatClient = class {
       const encodedPayload = await this.encodePayload({
         toDeviceId,
         body: messageBody,
-        metadata
+        metadata,
+        attachments
       });
       const children = [
         xml("body", {}, encodedPayload.body ?? messageBody),
@@ -260,13 +308,31 @@ var LulaChatClient = class {
       )
     );
   }
+  async resolveAttachment(attachment) {
+    const normalized = normalizeRequiredAttachment(attachment);
+    if (this.config.attachmentService?.resolve) {
+      const resolved = await this.config.attachmentService.resolve(
+        normalized,
+        this.getAttachmentResolveContext()
+      );
+      if (typeof resolved === "string" && resolved.trim()) return resolved.trim();
+    }
+    return defaultAttachmentSource(normalized);
+  }
   onMessage(listener) {
     return addListener(this.messageListeners, listener);
   }
   onChatMessage(listener) {
     return this.onMessage((message) => {
       if (isFormSubmissionMessage(message)) return;
+      if (isAttachmentMessage(message)) return;
       listener(toChatTextMessage(message));
+    });
+  }
+  onAttachmentMessage(listener) {
+    return this.onMessage((message) => {
+      if (!isAttachmentMessage(message)) return;
+      listener(toChatAttachmentMessage(message));
     });
   }
   onFormSubmission(listener) {
@@ -474,7 +540,8 @@ var LulaChatClient = class {
     }
     const decoded = await this.decodePayload(stanza);
     const body = decoded.body;
-    if (!body.trim()) return;
+    const attachments = normalizeAttachmentPayload(decoded.attachments);
+    if (!body.trim() && !attachments?.length) return;
     if (!roomId || !toDeviceId) return;
     const metadata = normalizeMessageMetadata(
       decoded.metadata,
@@ -489,6 +556,7 @@ var LulaChatClient = class {
       body,
       timestamp: parseDelayTimestamp(stanza) ?? parseMetadataTimestamp(metadata) ?? Date.now(),
       metadata,
+      ...attachments?.length ? { attachments } : {},
       raw: stanza
     });
     const receiptRequest = stanza.getChild?.("request", XMPP_RECEIPTS_NS);
@@ -517,6 +585,26 @@ var LulaChatClient = class {
       logger: this.config.logger
     };
   }
+  getAttachmentUploadContext(roomId) {
+    return {
+      roomId,
+      apiKey: this.config.apiKey,
+      xmppDomain: this.config.domain,
+      userId: this.config.userId,
+      deviceId: this.config.localDeviceId,
+      requestSlot: (input) => this.requestAttachmentUploadSlot(input),
+      logger: this.config.logger
+    };
+  }
+  getAttachmentResolveContext() {
+    return {
+      apiKey: this.config.apiKey,
+      xmppDomain: this.config.domain,
+      userId: this.config.userId,
+      deviceId: this.config.localDeviceId,
+      logger: this.config.logger
+    };
+  }
   rememberRoomPeer(roomId, peerDeviceId) {
     const normalizedRoomId = roomId?.trim();
     const normalizedPeerDeviceId = normalizeBareDeviceId(peerDeviceId);
@@ -537,7 +625,10 @@ var LulaChatClient = class {
     const room = await provider({ userId, metadata: input.metadata });
     const normalizedRoomId = room.roomId.trim();
     if (!normalizedRoomId) throw new Error("chat_room_id_required");
-    this.rememberRoomPeers(normalizedRoomId, room.peerDeviceIds);
+    this.rememberRoomPeers(
+      normalizedRoomId,
+      deriveFanoutDeviceIds(room)
+    );
     return { ...room, roomId: normalizedRoomId };
   }
   async resolveRoomTargets(input) {
@@ -622,7 +713,8 @@ var LulaChatClient = class {
           "lula",
           { xmlns: XMPP_CHAT_NS },
           encodeJsonBase64({
-            metadata: input.metadata
+            metadata: input.metadata,
+            ...input.attachments?.length ? { attachments: serializeAttachmentsForWire(input.attachments) } : {}
           })
         )
       ]
@@ -638,7 +730,8 @@ var LulaChatClient = class {
     const encodedMetadata = stanza.getChild?.("lula", XMPP_CHAT_NS)?.getText?.();
     const metadataPayload = encodedMetadata ? decodeJsonBase64(encodedMetadata) : null;
     const metadata = metadataPayload && typeof metadataPayload === "object" && !Array.isArray(metadataPayload) && isRecord(metadataPayload.metadata) ? metadataPayload.metadata : void 0;
-    return { body, metadata };
+    const attachments = metadataPayload && typeof metadataPayload === "object" && !Array.isArray(metadataPayload) ? normalizeAttachmentPayload(metadataPayload.attachments) : void 0;
+    return { body, metadata, attachments };
   }
   setStatus(status, error) {
     this.status = status;
@@ -691,6 +784,19 @@ var LulaChatClient = class {
         reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
+  }
+  async requestAttachmentUploadSlot(input) {
+    const stanza = await this.sendIq({
+      type: "get",
+      to: this.config.uploadService,
+      payload: xml("request", {
+        xmlns: XMPP_HTTP_UPLOAD_NS,
+        filename: input.name,
+        size: String(Math.max(1, Math.floor(input.size))),
+        "content-type": input.mimeType
+      })
+    });
+    return parseUploadSlotResponse(stanza);
   }
   emit(listeners, event) {
     for (const listener of Array.from(listeners)) {
@@ -911,7 +1017,8 @@ function createOmemoEncryption(options = {}) {
       const plaintext = new TextEncoder().encode(
         JSON.stringify({
           body: input.body,
-          ...input.metadata ? { metadata: input.metadata } : {}
+          ...input.metadata ? { metadata: input.metadata } : {},
+          ...input.attachments?.length ? { attachments: serializeAttachmentsForWire(input.attachments) } : {}
         })
       );
       const ciphertext = gcm(contentKey, iv).encrypt(plaintext);
@@ -1017,7 +1124,8 @@ function createOmemoEncryption(options = {}) {
         }
         return {
           body: typeof parsed.body === "string" ? parsed.body : "",
-          metadata: isRecord(parsed.metadata) ? parsed.metadata : void 0
+          metadata: isRecord(parsed.metadata) ? parsed.metadata : void 0,
+          attachments: normalizeAttachmentPayload(parsed.attachments)
         };
       } catch {
         return { body: "", metadata: void 0 };
@@ -1036,6 +1144,8 @@ function normalizeConfig(config) {
   const deviceId = buildXmppDeviceAddress(userId, localDeviceId, domain);
   return {
     service: buildXmppWebSocketUrl(domain, config.xmppWebSocketPath),
+    uploadService: trimToUndefined(config.xmppUploadService) ?? `upload.${domain}`,
+    apiKey: trimToUndefined(config.apiKey) ?? "",
     userId,
     localDeviceId,
     username,
@@ -1049,7 +1159,8 @@ function normalizeConfig(config) {
     roomDirectory: config.roomDirectory,
     resolveRoomDeviceIds: config.resolveRoomDeviceIds,
     logger: config.logger,
-    encryption: config.encryption
+    encryption: config.encryption,
+    attachmentService: config.attachmentService
   };
 }
 function extractProviderChatRoomId(metadata) {
@@ -1180,6 +1291,7 @@ function pickMessageTargetInput(input) {
     toDeviceIds: input.toDeviceIds,
     peerDeviceId: input.peerDeviceId,
     peerDeviceIds: input.peerDeviceIds,
+    attachments: input.attachments,
     roomId: input.roomId,
     targetRoomId: input.targetRoomId,
     id: input.id,
@@ -1207,10 +1319,43 @@ function toChatTextMessage(message) {
     ...Object.keys(context).length > 0 ? { context } : {}
   };
 }
+function toChatAttachmentMessage(message) {
+  const attachments = normalizeAttachmentPayload(message.attachments);
+  if (!attachments?.length) {
+    throw new Error("chat_attachment_message_missing_attachments");
+  }
+  const metadata = message.metadata;
+  const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
+  const submissionId = extractSubmissionId(metadata);
+  const displayName = extractDisplayName(metadata);
+  const lulaSubmission = isRecord(metadata?.lulaSubmission) ? metadata?.lulaSubmission : void 0;
+  const context = removeUndefinedValues({
+    ...lulaSubmission ?? {},
+    ...providerChatRoomId ? { providerChatRoomId } : {},
+    ...submissionId ? { submissionId } : {},
+    ...displayName ? { displayName } : {}
+  });
+  return {
+    ...message,
+    attachments,
+    metadata: normalizeMessageMetadata(message.metadata, "CHAT_MESSAGE"),
+    providerChatRoomId,
+    submissionId,
+    ...displayName ? { displayName } : {},
+    ...Object.keys(context).length > 0 ? { context } : {}
+  };
+}
 function isFormSubmissionMessage(message) {
   const metadataType = extractMessageType(message.metadata);
   if (metadataType === "FORM_SUBMISSION") return true;
   return Boolean(parseFormSubmissionMessage(message));
+}
+function isAttachmentMessage(message) {
+  const attachments = normalizeAttachmentPayload(message.attachments);
+  if (!attachments?.length) return false;
+  if (message.metadata.attachment === true) return true;
+  const metadataType = extractMessageType(message.metadata);
+  return metadataType === "CHAT_MESSAGE";
 }
 function parseFormSubmissionMessage(message) {
   const payload = parseJsonRecord(message.body);
@@ -1285,6 +1430,57 @@ function parseJsonRecord(input) {
     return null;
   }
 }
+function serializeAttachmentsForWire(attachments) {
+  return attachments.map((attachment) => {
+    const normalized = normalizeRequiredAttachment(attachment);
+    const { localUri: _localUri, ...rest } = normalized;
+    return rest;
+  });
+}
+function normalizeAttachmentPayload(value) {
+  if (!Array.isArray(value)) return void 0;
+  const attachments = value.map((entry) => normalizeAttachment(entry)).filter((entry) => Boolean(entry));
+  return attachments.length ? attachments : void 0;
+}
+function normalizeRequiredAttachment(value) {
+  const attachment = normalizeAttachment(value);
+  if (!attachment) throw new Error("chat_attachment_invalid");
+  return attachment;
+}
+function normalizeAttachment(value) {
+  if (!isRecord(value)) return null;
+  const id = firstString(value.id, value.url, value.localUri, value.thumbnailUrl);
+  if (!id) return null;
+  const type = normalizeAttachmentType(value);
+  const metadata = isRecord(value.metadata) ? value.metadata : void 0;
+  return removeUndefinedValues({
+    id,
+    type,
+    name: firstString(value.name),
+    mimeType: firstString(value.mimeType),
+    size: typeof value.size === "number" && Number.isFinite(value.size) ? Math.max(0, Math.floor(value.size)) : void 0,
+    url: firstString(value.url),
+    thumbnailUrl: firstString(value.thumbnailUrl),
+    localUri: firstString(value.localUri),
+    width: typeof value.width === "number" && Number.isFinite(value.width) ? Math.max(0, Math.floor(value.width)) : void 0,
+    height: typeof value.height === "number" && Number.isFinite(value.height) ? Math.max(0, Math.floor(value.height)) : void 0,
+    metadata
+  });
+}
+function normalizeAttachmentType(value) {
+  const explicit = firstString(value.type)?.toLowerCase();
+  if (explicit === "image" || explicit === "file") return explicit;
+  const mimeType = firstString(value.mimeType)?.toLowerCase();
+  if (mimeType?.startsWith("image/")) return "image";
+  return "file";
+}
+function defaultAttachmentSource(attachment) {
+  const direct = firstString(attachment.localUri, attachment.url);
+  if (direct) return direct;
+  const id = firstString(attachment.id);
+  if (id && /^(https?:|file:)/i.test(id)) return id;
+  return null;
+}
 function removeUndefinedValues(input) {
   const output = {};
   for (const [key, value] of Object.entries(input)) {
@@ -1358,6 +1554,31 @@ function generateMessageId() {
 function generateIqId() {
   return `iq-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
+function parseUploadSlotResponse(stanza) {
+  const raw = toRawXmlString(stanza);
+  const putMatch = raw.match(/<put\b([^>]*)>([\s\S]*?)<\/put>/) ?? raw.match(/<put\b([^>]*)\/>/);
+  const getMatch = raw.match(/<get\b([^>]*)\/>/) ?? raw.match(/<get\b([^>]*)>(?:[\s\S]*?)<\/get>/);
+  if (!putMatch?.[1] || !getMatch?.[1]) {
+    throw new Error("chat_attachment_upload_slot_invalid");
+  }
+  const putAttrs = parseXmlAttributes(putMatch[1]);
+  const getAttrs = parseXmlAttributes(getMatch[1]);
+  const putUrl = putAttrs.url?.trim();
+  const getUrl = getAttrs.url?.trim();
+  if (!putUrl || !getUrl) {
+    throw new Error("chat_attachment_upload_slot_invalid");
+  }
+  const headers = {};
+  const headerRegex = /<header\b([^>]*)>([\s\S]*?)<\/header>/g;
+  let headerMatch = null;
+  while ((headerMatch = headerRegex.exec(putMatch[2] ?? "")) !== null) {
+    const attrs = parseXmlAttributes(headerMatch[1] ?? "");
+    const name = attrs.name?.trim();
+    const value = decodeXmlEntities((headerMatch[2] ?? "").trim());
+    if (name && value) headers[name] = value;
+  }
+  return { putUrl, getUrl, headers };
+}
 function buildXmppLocalpart(userId, deviceId) {
   return `i.${userId}.d.${deviceId}`;
 }
@@ -1426,12 +1647,17 @@ function normalizeChatRoomResponse(response, options = {}) {
   if (!roomId) throw new Error("chat_room_id_required");
   const id = firstString(roomRecord.id, roomRecord._id);
   const peerDeviceIds = collectPeerDeviceIdsFromRoom(roomRecord, options);
+  const ownDeviceIds = collectOwnDeviceIdsFromRoom(roomRecord, options);
   return {
     ...id ? { id } : {},
     roomId,
-    peerDeviceIds,
+    ...peerDeviceIds.length ? { peerDeviceIds } : {},
+    ...ownDeviceIds.length ? { ownDeviceIds } : {},
     raw: response
   };
+}
+function deriveFanoutDeviceIds(room) {
+  return normalizeDeviceIdList([...room.peerDeviceIds ?? [], ...room.ownDeviceIds ?? []]);
 }
 function unwrapRoomRecord(response) {
   if (!isRecord(response)) throw new Error("chat_room_response_invalid");
@@ -1481,6 +1707,34 @@ function collectPeerDeviceIdsFromRoom(room, options) {
     pushDeviceIdCandidates(candidates, entry.deviceIds, domain, entryUserId);
     pushDeviceIdCandidates(candidates, entry.chatUserId, domain, entryUserId);
     pushDeviceIdCandidates(candidates, entry.chatUserIds, domain, entryUserId);
+  }
+  return normalizeDeviceIdList(candidates);
+}
+function collectOwnDeviceIdsFromRoom(room, options) {
+  const candidates = [];
+  const domain = normalizeXmppDomain(options.xmppDomain);
+  const current = normalizeUserName(options.currentUserId);
+  if (!current) {
+    return [];
+  }
+  pushDeviceIdCandidates(candidates, room.selfDeviceId, domain, options.currentUserId);
+  pushDeviceIdCandidates(candidates, room.selfDeviceIds, domain, options.currentUserId);
+  pushDeviceIdCandidates(candidates, room.selfChatUserId, domain, options.currentUserId);
+  pushDeviceIdCandidates(candidates, room.selfChatUserIds, domain, options.currentUserId);
+  const userMetadata = Array.isArray(room.userMetadata) ? room.userMetadata : [];
+  for (const entry of userMetadata) {
+    if (!isRecord(entry)) continue;
+    const entryNames = collectStringValues(
+      entry.id,
+      entry.userId,
+      entry.appUserId,
+      entry.providerUserId
+    ).map(normalizeUserName);
+    if (!entryNames.includes(current)) continue;
+    pushDeviceIdCandidates(candidates, entry.deviceId, domain, options.currentUserId);
+    pushDeviceIdCandidates(candidates, entry.deviceIds, domain, options.currentUserId);
+    pushDeviceIdCandidates(candidates, entry.chatUserId, domain, options.currentUserId);
+    pushDeviceIdCandidates(candidates, entry.chatUserIds, domain, options.currentUserId);
   }
   return normalizeDeviceIdList(candidates);
 }
@@ -1693,6 +1947,20 @@ function toRawXmlString(value) {
     return "";
   }
   return "";
+}
+function parseXmlAttributes(input) {
+  const attributes = {};
+  const pattern = /([a-zA-Z_:][\w:.-]*)\s*=\s*(['"])([\s\S]*?)\2/g;
+  let match = null;
+  while ((match = pattern.exec(input)) !== null) {
+    const name = match[1]?.trim();
+    const value = decodeXmlEntities(match[3] ?? "");
+    if (name) attributes[name] = value;
+  }
+  return attributes;
+}
+function decodeXmlEntities(input) {
+  return input.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
 }
 function encodeJsonBase64(value) {
   const json = JSON.stringify(value);

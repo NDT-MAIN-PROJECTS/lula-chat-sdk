@@ -22,6 +22,7 @@ export type ChatRoom = {
     id?: string;
     roomId: string;
     peerDeviceIds?: DeviceId[];
+    ownDeviceIds?: DeviceId[];
     raw?: unknown;
 };
 export type ChatRoomDirectoryOptions = {
@@ -55,6 +56,58 @@ export type MongoDbStorageOptions = {
     valueField?: string;
     updatedAtField?: string;
 };
+export type ChatAttachment = {
+    id: string;
+    type: "image" | "file";
+    name?: string;
+    mimeType?: string;
+    size?: number;
+    url?: string;
+    thumbnailUrl?: string;
+    localUri?: string;
+    width?: number;
+    height?: number;
+    metadata?: Record<string, unknown>;
+};
+export type ChatAttachmentUpload = {
+    uri?: string;
+    name?: string;
+    mimeType?: string;
+    size?: number;
+    data?: ArrayBuffer | Uint8Array;
+    metadata?: Record<string, unknown>;
+    raw?: unknown;
+};
+export type ChatAttachmentUploadSlotRequest = {
+    name: string;
+    mimeType: string;
+    size: number;
+};
+export type ChatAttachmentUploadSlot = {
+    putUrl: string;
+    getUrl: string;
+    headers: Record<string, string>;
+};
+export type ChatAttachmentUploadContext = {
+    roomId: string;
+    apiKey: string;
+    xmppDomain: string;
+    userId: string;
+    deviceId: DeviceId;
+    requestSlot: (input: ChatAttachmentUploadSlotRequest) => Promise<ChatAttachmentUploadSlot>;
+    logger?: ChatLogger;
+};
+export type ChatAttachmentResolveContext = {
+    apiKey: string;
+    xmppDomain: string;
+    userId: string;
+    deviceId: DeviceId;
+    logger?: ChatLogger;
+};
+export type ChatAttachmentService = {
+    upload: (input: ChatAttachmentUpload, context: ChatAttachmentUploadContext) => Promise<ChatAttachment> | ChatAttachment;
+    resolve?: (attachment: ChatAttachment, context: ChatAttachmentResolveContext) => Promise<string | null | undefined> | string | null | undefined;
+};
 export type ChatClientBaseConfig = {
     /** API key for app access to the chat service. */
     apiKey: string;
@@ -62,6 +115,8 @@ export type ChatClientBaseConfig = {
     xmppWebSocketPath?: string;
     /** Chat service domain, for example "api.dev.lulafi.co". */
     xmppDomain: string;
+    /** XMPP upload service JID. Defaults to "upload.<xmppDomain>". */
+    xmppUploadService?: string;
     /** Current app user id. The SDK uses it to derive the transport address. */
     userId: string;
     /** Current device id token, for example "d0eb68ad2ff10ee7". */
@@ -82,6 +137,8 @@ export type ChatClientBaseConfig = {
     logger?: ChatLogger;
     /** Message encryption adapter. Pass createOmemoEncryption(...) for built-in OMEMO. */
     encryption: ChatEncryption;
+    /** Attachment upload and resolve adapter for file and image messages. */
+    attachmentService?: ChatAttachmentService;
 };
 export type ChatPasswordAuthConfig = ChatClientBaseConfig & {
     /** Password auth is the default when authType is omitted. */
@@ -109,6 +166,7 @@ export type ChatMessage = {
     body: string;
     timestamp: number;
     metadata: ChatMessageMetadata;
+    attachments?: ChatAttachment[];
     raw?: unknown;
 };
 export type ChatMessageContext = {
@@ -124,6 +182,7 @@ export type ChatMessageInput = {
     peerDeviceId?: DeviceId;
     peerDeviceIds?: DeviceId[];
     body: string;
+    attachments?: ChatAttachment[];
     roomId?: string;
     targetRoomId?: string;
     metadata?: Record<string, unknown>;
@@ -135,6 +194,13 @@ export type ChatTextMessageInput = Omit<ChatMessageInput, "metadata"> & {
     context?: ChatMessageContext;
 };
 export type ChatTextMessage = ChatMessage & {
+    context?: ChatMessageContext;
+    providerChatRoomId?: string;
+    submissionId?: string;
+    displayName?: string;
+};
+export type ChatAttachmentMessage = ChatMessage & {
+    attachments: ChatAttachment[];
     context?: ChatMessageContext;
     providerChatRoomId?: string;
     submissionId?: string;
@@ -167,6 +233,10 @@ export type ChatFormSubmissionMessage = ChatMessage & {
     recordId?: string;
     formVersion?: number;
     submittedAt?: string;
+};
+export type ChatAttachmentMessageInput = Omit<ChatTextMessageInput, "body" | "attachments"> & {
+    attachment: ChatAttachmentUpload;
+    body?: string;
 };
 export type ChatTypingInput = {
     roomId: string;
@@ -232,6 +302,7 @@ export type ChatEncryptInput = {
     toDeviceId: DeviceId;
     body: string;
     metadata: ChatMessageMetadata;
+    attachments?: ChatAttachment[];
 };
 export type ChatEncodedPayload = {
     body?: string;
@@ -243,6 +314,7 @@ export type ChatDecryptInput = {
 export type ChatDecryptedMessage = {
     body: string;
     metadata?: Record<string, unknown>;
+    attachments?: ChatAttachment[];
 };
 export type ChatEncryptionContext = {
     getDeviceId: () => DeviceId | undefined;
@@ -277,6 +349,17 @@ export type ChatClient = {
         (roomId: string, body: string, options?: Omit<ChatTextMessageInput, "roomId" | "body">): Promise<string>;
     };
     sendFormSubmission: (message: ChatFormSubmissionInput) => Promise<string>;
+    uploadAttachment: {
+        (roomId: string, attachment: ChatAttachmentUpload): Promise<ChatAttachment>;
+        (input: {
+            roomId: string;
+            attachment: ChatAttachmentUpload;
+        }): Promise<ChatAttachment>;
+    };
+    sendAttachment: {
+        (message: ChatAttachmentMessageInput): Promise<string>;
+        (roomId: string, attachment: ChatAttachmentUpload, options?: Omit<ChatAttachmentMessageInput, "roomId" | "attachment">): Promise<string>;
+    };
     /**
      * @deprecated Prefer sendChatMessage or sendFormSubmission for typed payloads.
      */
@@ -297,11 +380,13 @@ export type ChatClient = {
      */
     onMessage: (listener: (message: ChatMessage) => void) => Unsubscribe;
     onChatMessage: (listener: (message: ChatTextMessage) => void) => Unsubscribe;
+    onAttachmentMessage: (listener: (message: ChatAttachmentMessage) => void) => Unsubscribe;
     onFormSubmission: (listener: (message: ChatFormSubmissionMessage) => void) => Unsubscribe;
     onTyping: (listener: (event: ChatTypingEvent) => void) => Unsubscribe;
     onDelivery: (listener: (event: ChatDeliveryEvent) => void) => Unsubscribe;
     onError: (listener: (event: ChatErrorEvent) => void) => Unsubscribe;
     onStatus: (listener: (event: ChatStatusEvent) => void) => Unsubscribe;
+    resolveAttachment: (attachment: ChatAttachment) => Promise<string | null>;
     getStatus: () => ChatStatus;
     getDeviceId: () => DeviceId | undefined;
     getBareDeviceId: () => DeviceId | undefined;
