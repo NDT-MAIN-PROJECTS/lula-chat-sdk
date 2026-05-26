@@ -21,6 +21,10 @@ export type DeviceId = string;
 
 type ChatMessageType = "CHAT_MESSAGE" | "FORM_SUBMISSION";
 
+export type ChatMessageMetadata = Record<string, unknown> & {
+  messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION";
+};
+
 export const chatResources = [
   "server-client",
   "ios-primary-client",
@@ -162,11 +166,11 @@ export type ChatClientConfig = ChatPasswordAuthConfig | ChatXOAuth2Config;
 export type ChatMessage = {
   id: string;
   fromDeviceId: DeviceId;
-  toDeviceId?: DeviceId;
-  roomId?: string;
+  toDeviceId: DeviceId;
+  roomId: string;
   body: string;
   timestamp: number;
-  metadata?: Record<string, unknown>;
+  metadata: ChatMessageMetadata;
   raw?: unknown;
 };
 
@@ -250,7 +254,7 @@ export type ChatDisplayedInput = {
 export type ChatTypingEvent = {
   fromDeviceId: DeviceId;
   toDeviceId?: DeviceId;
-  roomId?: string;
+  roomId: string;
   isTyping: boolean;
   raw?: unknown;
 };
@@ -259,7 +263,7 @@ export type ChatDeliveryEvent = {
   id: string;
   fromDeviceId: DeviceId;
   toDeviceId?: DeviceId;
-  roomId?: string;
+  roomId: string;
   status: ChatDeliveryStatus;
   raw?: unknown;
 };
@@ -284,7 +288,7 @@ export type ChatStatusEvent = {
 export type ChatEncryptInput = {
   toDeviceId: DeviceId;
   body: string;
-  metadata?: Record<string, unknown>;
+  metadata: ChatMessageMetadata;
 };
 
 export type ChatEncodedPayload = {
@@ -627,6 +631,7 @@ class LulaChatClient implements ChatClient {
         : inputOrRoomId;
     const messageBody = input.body ?? "";
     if (!messageBody.trim()) throw new Error("chat_body_required");
+    const metadata = normalizeMessageMetadata(input.metadata, "CHAT_MESSAGE");
 
     await this.connect();
     const xmpp = this.requireXmpp();
@@ -642,7 +647,7 @@ class LulaChatClient implements ChatClient {
       const encodedPayload = await this.encodePayload({
         toDeviceId,
         body: messageBody,
-        metadata: input.metadata,
+        metadata,
       });
       const children: XmppChild[] = [
         xml("body", {}, encodedPayload.body ?? messageBody),
@@ -913,7 +918,9 @@ class LulaChatClient implements ChatClient {
 
     const attrs = stanza.attrs ?? {};
     const fromDeviceId = normalizeBareDeviceId(attrs.from) || attrs.from || "";
-    const toDeviceId = attrs.to ? normalizeBareDeviceId(attrs.to) || attrs.to : undefined;
+    const toDeviceId = attrs.to
+      ? normalizeBareDeviceId(attrs.to) || attrs.to
+      : this.getBareDeviceId();
     const roomId = trimToUndefined(stanza.getChildText?.("thread") ?? undefined);
     this.rememberRoomPeer(roomId, fromDeviceId);
 
@@ -922,26 +929,30 @@ class LulaChatClient implements ChatClient {
     const displayed = stanza.getChild?.("displayed", XMPP_CHAT_MARKERS_NS);
     const receiptId = receipt?.attrs?.id ?? markerReceived?.attrs?.id;
     if (receiptId) {
-      this.emit(this.deliveryListeners, {
-        id: receiptId,
-        fromDeviceId,
-        toDeviceId,
-        roomId,
-        status: "delivered",
-        raw: stanza,
-      });
+      if (roomId) {
+        this.emit(this.deliveryListeners, {
+          id: receiptId,
+          fromDeviceId,
+          toDeviceId,
+          roomId,
+          status: "delivered",
+          raw: stanza,
+        });
+      }
       return;
     }
 
     if (displayed?.attrs?.id) {
-      this.emit(this.deliveryListeners, {
-        id: displayed.attrs.id,
-        fromDeviceId,
-        toDeviceId,
-        roomId,
-        status: "read",
-        raw: stanza,
-      });
+      if (roomId) {
+        this.emit(this.deliveryListeners, {
+          id: displayed.attrs.id,
+          fromDeviceId,
+          toDeviceId,
+          roomId,
+          status: "read",
+          raw: stanza,
+        });
+      }
       return;
     }
 
@@ -960,7 +971,7 @@ class LulaChatClient implements ChatClient {
 
     const composing = stanza.getChild?.("composing", XMPP_CHATSTATES_NS);
     const paused = stanza.getChild?.("paused", XMPP_CHATSTATES_NS);
-    if (composing || paused) {
+    if ((composing || paused) && roomId) {
       this.emit(this.typingListeners, {
         fromDeviceId,
         toDeviceId,
@@ -973,6 +984,11 @@ class LulaChatClient implements ChatClient {
     const decoded = await this.decodePayload(stanza);
     const body = decoded.body;
     if (!body.trim()) return;
+    if (!roomId || !toDeviceId) return;
+    const metadata = normalizeMessageMetadata(
+      decoded.metadata,
+      inferMessageType(decoded.metadata, body),
+    );
 
     this.emit(this.messageListeners, {
       id: attrs.id || generateMessageId(),
@@ -980,8 +996,8 @@ class LulaChatClient implements ChatClient {
       toDeviceId,
       roomId,
       body,
-      timestamp: parseDelayTimestamp(stanza) ?? parseMetadataTimestamp(decoded.metadata) ?? Date.now(),
-      metadata: decoded.metadata,
+      timestamp: parseDelayTimestamp(stanza) ?? parseMetadataTimestamp(metadata) ?? Date.now(),
+      metadata,
       raw: stanza,
     });
 
@@ -1135,7 +1151,6 @@ class LulaChatClient implements ChatClient {
       };
     }
 
-    if (!input.metadata) return { body: input.body, children: [] };
     return {
       body: input.body,
       children: [
@@ -1735,14 +1750,34 @@ function extractMessageType(metadata?: Record<string, unknown>): ChatMessageType
   return undefined;
 }
 
+function normalizeMessageMetadata(
+  metadata: Record<string, unknown> | undefined,
+  fallbackType: ChatMessageType,
+): ChatMessageMetadata {
+  return {
+    ...(metadata ?? {}),
+    messageType: extractMessageType(metadata) ?? fallbackType,
+  } as ChatMessageMetadata;
+}
+
+function inferMessageType(metadata: Record<string, unknown> | undefined, body: string): ChatMessageType {
+  const metadataType = extractMessageType(metadata);
+  if (metadataType) return metadataType;
+  if (isRecord(metadata?.lulaPayload)) return "FORM_SUBMISSION";
+
+  const payload = parseJsonRecord(body);
+  if (payload?.type === "form_submission") return "FORM_SUBMISSION";
+  if (payload && (isRecord(payload.readable) || isRecord(payload.raw))) return "FORM_SUBMISSION";
+  return "CHAT_MESSAGE";
+}
+
 export function buildChatMessageMetadata(input: {
   roomId?: string;
   metadata?: Record<string, unknown>;
   context?: ChatMessageContext;
   displayName?: string;
-}): Record<string, unknown> | undefined {
-  const metadata: Record<string, unknown> = { ...(input.metadata ?? {}) };
-  metadata.messageType = "CHAT_MESSAGE";
+}): ChatMessageMetadata {
+  const metadata = normalizeMessageMetadata(input.metadata, "CHAT_MESSAGE");
   const providerChatRoomId = firstString(
     input.context?.providerChatRoomId,
     extractProviderChatRoomId(metadata),
@@ -1787,7 +1822,7 @@ export function buildChatMessageMetadata(input: {
     });
   }
 
-  return Object.keys(metadata).length > 0 ? metadata : undefined;
+  return metadata;
 }
 
 export function buildFormSubmissionMetadata(
@@ -1802,9 +1837,8 @@ export function buildFormSubmissionMetadata(
     | "providerChatRoomId"
     | "submittedAt"
   > & { displayName?: string },
-): Record<string, unknown> {
-  const metadata: Record<string, unknown> = { ...(input.metadata ?? {}) };
-  metadata.messageType = "FORM_SUBMISSION";
+): ChatMessageMetadata {
+  const metadata = normalizeMessageMetadata(input.metadata, "FORM_SUBMISSION");
   const providerChatRoomId = firstString(
     input.providerChatRoomId,
     extractProviderChatRoomId(metadata),
@@ -1894,6 +1928,7 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
 
   return {
     ...message,
+    metadata: normalizeMessageMetadata(message.metadata, "CHAT_MESSAGE"),
     providerChatRoomId,
     submissionId,
     ...(displayName ? { displayName } : {}),
@@ -1930,6 +1965,7 @@ function parseFormSubmissionMessage(message: ChatMessage): ChatFormSubmissionMes
   const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
   return {
     ...message,
+    metadata: normalizeMessageMetadata(metadata, "FORM_SUBMISSION"),
     payload,
     providerChatRoomId,
     formId: firstString(lulaPayload?.formId, payload.formId),

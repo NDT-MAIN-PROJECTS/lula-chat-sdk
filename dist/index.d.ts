@@ -3,6 +3,9 @@ export type Unsubscribe = () => void;
 export type ChatStatus = "idle" | "connecting" | "online" | "offline" | "stopping" | "error";
 export type ChatDeliveryStatus = "delivered" | "read";
 export type DeviceId = string;
+export type ChatMessageMetadata = Record<string, unknown> & {
+    messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION";
+};
 export declare const chatResources: readonly ["server-client", "ios-primary-client", "android-primary-client", "ios-secondary-client", "android-secondary-client"];
 export type ChatResource = (typeof chatResources)[number];
 export type ChatLogger = {
@@ -100,11 +103,11 @@ export type ChatClientConfig = ChatPasswordAuthConfig | ChatXOAuth2Config;
 export type ChatMessage = {
     id: string;
     fromDeviceId: DeviceId;
-    toDeviceId?: DeviceId;
-    roomId?: string;
+    toDeviceId: DeviceId;
+    roomId: string;
     body: string;
     timestamp: number;
-    metadata?: Record<string, unknown>;
+    metadata: ChatMessageMetadata;
     raw?: unknown;
 };
 export type ChatMessageContext = {
@@ -179,7 +182,7 @@ export type ChatDisplayedInput = {
 export type ChatTypingEvent = {
     fromDeviceId: DeviceId;
     toDeviceId?: DeviceId;
-    roomId?: string;
+    roomId: string;
     isTyping: boolean;
     raw?: unknown;
 };
@@ -187,7 +190,7 @@ export type ChatDeliveryEvent = {
     id: string;
     fromDeviceId: DeviceId;
     toDeviceId?: DeviceId;
-    roomId?: string;
+    roomId: string;
     status: ChatDeliveryStatus;
     raw?: unknown;
 };
@@ -209,7 +212,7 @@ export type ChatStatusEvent = {
 export type ChatEncryptInput = {
     toDeviceId: DeviceId;
     body: string;
-    metadata?: Record<string, unknown>;
+    metadata: ChatMessageMetadata;
 };
 export type ChatEncodedPayload = {
     body?: string;
@@ -307,10 +310,10 @@ export declare function buildChatMessageMetadata(input: {
     metadata?: Record<string, unknown>;
     context?: ChatMessageContext;
     displayName?: string;
-}): Record<string, unknown> | undefined;
+}): ChatMessageMetadata;
 export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerChatRoomId" | "submittedAt"> & {
     displayName?: string;
-}): Record<string, unknown>;
+}): ChatMessageMetadata;
 export declare function createMemoryStorageBackend(): ChatKeyValueStore;
 export declare function createIndexDbStorageBackend(options?: IndexDbStorageOptions): ChatKeyValueStore;
 export declare function createMongoDbStorageBackend(options: MongoDbStorageOptions): ChatKeyValueStore;
