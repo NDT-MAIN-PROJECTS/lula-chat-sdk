@@ -140,6 +140,12 @@ export type ChatTextMessage = ChatMessage & {
     submissionId?: string;
     displayName?: string;
 };
+export type ChatFormSubmissionField = {
+    id: string;
+    label: string;
+    type: string;
+    required: boolean;
+};
 export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"> & {
     payload: Record<string, unknown>;
     metadata?: Record<string, unknown>;
@@ -152,6 +158,8 @@ export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"
     pretty?: boolean;
 };
 export type ChatFormSubmissionMessage = ChatMessage & {
+    answers: Record<string, string>;
+    fields: ChatFormSubmissionField[];
     payload: Record<string, unknown>;
     providerChatRoomId?: string;
     formId?: string;

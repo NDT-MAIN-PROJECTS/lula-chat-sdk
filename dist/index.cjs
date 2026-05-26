@@ -1247,9 +1247,12 @@ function parseFormSubmissionMessage(message) {
     return null;
   }
   const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
+  const normalizedFormPayload = normalizeFormSubmissionPayload(payload);
   return {
     ...message,
     metadata: normalizeMessageMetadata(metadata, "FORM_SUBMISSION"),
+    answers: normalizedFormPayload.answers,
+    fields: normalizedFormPayload.fields,
     payload,
     providerChatRoomId,
     formId: firstString(lulaPayload?.formId, payload.formId),
@@ -1258,6 +1261,44 @@ function parseFormSubmissionMessage(message) {
     formVersion: typeof lulaPayload?.formVersion === "number" ? lulaPayload.formVersion : typeof payload.formVersion === "number" ? payload.formVersion : void 0,
     submittedAt: firstString(lulaPayload?.submittedAt, payload.submittedAt)
   };
+}
+function normalizeFormSubmissionPayload(payload) {
+  const readable = isRecord(payload.readable) ? payload.readable : {};
+  const raw = isRecord(payload.raw) ? payload.raw : {};
+  const keys = Array.from(/* @__PURE__ */ new Set([...Object.keys(raw), ...Object.keys(readable)]));
+  const answers = {};
+  const fields = keys.map((key) => {
+    const readableEntry = isRecord(readable[key]) ? readable[key] : void 0;
+    const rawValue = raw[key];
+    const value = readableEntry && "value" in readableEntry ? readableEntry.value : rawValue;
+    answers[key] = stringifyAnswerValue(value);
+    return {
+      id: firstString(readableEntry?.id, readableEntry?.fieldId, key) ?? key,
+      label: firstString(readableEntry?.label, key) ?? key,
+      type: firstString(readableEntry?.type, readableEntry?.fieldType) ?? inferFieldType(value),
+      required: readableEntry?.required === true
+    };
+  });
+  return { answers, fields };
+}
+function stringifyAnswerValue(value) {
+  if (value === void 0 || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+function inferFieldType(value) {
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "number") return "number";
+  if (isRecord(value)) return "object";
+  return "text";
 }
 function parseJsonRecord(input) {
   try {

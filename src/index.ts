@@ -208,6 +208,13 @@ export type ChatTextMessage = ChatMessage & {
   displayName?: string;
 };
 
+export type ChatFormSubmissionField = {
+  id: string;
+  label: string;
+  type: string;
+  required: boolean;
+};
+
 export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"> & {
   payload: Record<string, unknown>;
   metadata?: Record<string, unknown>;
@@ -221,6 +228,8 @@ export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"
 };
 
 export type ChatFormSubmissionMessage = ChatMessage & {
+  answers: Record<string, string>;
+  fields: ChatFormSubmissionField[];
   payload: Record<string, unknown>;
   providerChatRoomId?: string;
   formId?: string;
@@ -1963,9 +1972,12 @@ function parseFormSubmissionMessage(message: ChatMessage): ChatFormSubmissionMes
   }
 
   const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
+  const normalizedFormPayload = normalizeFormSubmissionPayload(payload);
   return {
     ...message,
     metadata: normalizeMessageMetadata(metadata, "FORM_SUBMISSION"),
+    answers: normalizedFormPayload.answers,
+    fields: normalizedFormPayload.fields,
     payload,
     providerChatRoomId,
     formId: firstString(lulaPayload?.formId, payload.formId),
@@ -1979,6 +1991,52 @@ function parseFormSubmissionMessage(message: ChatMessage): ChatFormSubmissionMes
           : undefined,
     submittedAt: firstString(lulaPayload?.submittedAt, payload.submittedAt),
   };
+}
+
+function normalizeFormSubmissionPayload(payload: Record<string, unknown>): {
+  answers: Record<string, string>;
+  fields: ChatFormSubmissionField[];
+} {
+  const readable = isRecord(payload.readable) ? payload.readable : {};
+  const raw = isRecord(payload.raw) ? payload.raw : {};
+  const keys = Array.from(new Set([...Object.keys(raw), ...Object.keys(readable)]));
+  const answers: Record<string, string> = {};
+  const fields = keys.map((key) => {
+    const readableEntry = isRecord(readable[key]) ? readable[key] : undefined;
+    const rawValue = raw[key];
+    const value = readableEntry && "value" in readableEntry ? readableEntry.value : rawValue;
+    answers[key] = stringifyAnswerValue(value);
+
+    return {
+      id: firstString(readableEntry?.id, readableEntry?.fieldId, key) ?? key,
+      label: firstString(readableEntry?.label, key) ?? key,
+      type: firstString(readableEntry?.type, readableEntry?.fieldType) ?? inferFieldType(value),
+      required: readableEntry?.required === true,
+    };
+  });
+
+  return { answers, fields };
+}
+
+function stringifyAnswerValue(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function inferFieldType(value: unknown): string {
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "number") return "number";
+  if (isRecord(value)) return "object";
+  return "text";
 }
 
 function parseJsonRecord(input: string): Record<string, unknown> | null {
