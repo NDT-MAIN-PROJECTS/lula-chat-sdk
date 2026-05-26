@@ -165,6 +165,7 @@ export type ChatClientConfig = ChatPasswordAuthConfig | ChatXOAuth2Config;
 
 export type ChatMessage = {
   id: string;
+  fromUserId: string;
   fromDeviceId: DeviceId;
   toDeviceId: DeviceId;
   roomId: string;
@@ -261,6 +262,7 @@ export type ChatDisplayedInput = {
 };
 
 export type ChatTypingEvent = {
+  fromUserId: string;
   fromDeviceId: DeviceId;
   toDeviceId?: DeviceId;
   roomId: string;
@@ -270,6 +272,7 @@ export type ChatTypingEvent = {
 
 export type ChatDeliveryEvent = {
   id: string;
+  fromUserId: string;
   fromDeviceId: DeviceId;
   toDeviceId?: DeviceId;
   roomId: string;
@@ -279,6 +282,7 @@ export type ChatDeliveryEvent = {
 
 export type ChatErrorEvent = {
   id?: string;
+  fromUserId?: string;
   fromDeviceId?: DeviceId;
   toDeviceId?: DeviceId;
   roomId?: string;
@@ -927,6 +931,7 @@ class LulaChatClient implements ChatClient {
 
     const attrs = stanza.attrs ?? {};
     const fromDeviceId = normalizeBareDeviceId(attrs.from) || attrs.from || "";
+    const fromUserId = normalizeUserIdSegment(fromDeviceId) || "";
     const toDeviceId = attrs.to
       ? normalizeBareDeviceId(attrs.to) || attrs.to
       : this.getBareDeviceId();
@@ -941,6 +946,7 @@ class LulaChatClient implements ChatClient {
       if (roomId) {
         this.emit(this.deliveryListeners, {
           id: receiptId,
+          fromUserId,
           fromDeviceId,
           toDeviceId,
           roomId,
@@ -955,6 +961,7 @@ class LulaChatClient implements ChatClient {
       if (roomId) {
         this.emit(this.deliveryListeners, {
           id: displayed.attrs.id,
+          fromUserId,
           fromDeviceId,
           toDeviceId,
           roomId,
@@ -970,6 +977,7 @@ class LulaChatClient implements ChatClient {
       this.emit(this.errorListeners, {
         ...errorEvent,
         id: attrs.id,
+        fromUserId: fromUserId || undefined,
         fromDeviceId,
         toDeviceId,
         roomId,
@@ -982,6 +990,7 @@ class LulaChatClient implements ChatClient {
     const paused = stanza.getChild?.("paused", XMPP_CHATSTATES_NS);
     if ((composing || paused) && roomId) {
       this.emit(this.typingListeners, {
+        fromUserId,
         fromDeviceId,
         toDeviceId,
         roomId,
@@ -1001,6 +1010,7 @@ class LulaChatClient implements ChatClient {
 
     this.emit(this.messageListeners, {
       id: attrs.id || generateMessageId(),
+      fromUserId,
       fromDeviceId,
       toDeviceId,
       roomId,

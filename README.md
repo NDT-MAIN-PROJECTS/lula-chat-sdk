@@ -33,7 +33,7 @@ const {
 } = chatClient;
 
 onChatMessage((message) => {
-  console.log(message.fromDeviceId, message.body);
+  console.log(message.fromUserId, message.fromDeviceId, message.body);
   markRead(message.roomId!, message.id);
 });
 
@@ -135,6 +135,8 @@ The SDK resolves room device IDs inside `sendChatMessage()`, `sendFormSubmission
 The SDK remembers room peers after sends and incoming room messages.
 
 Fanout treats partial delivery as success. It only throws after every target send fails.
+
+Incoming chat, form submission, typing, and delivery events include both `fromUserId` and `fromDeviceId`. Use `fromUserId` for app-user matching and `fromDeviceId` for device-level delivery or fanout logic.
 
 ## Room Directory
 

@@ -102,6 +102,7 @@ export type ChatXOAuth2Config = ChatClientBaseConfig & {
 export type ChatClientConfig = ChatPasswordAuthConfig | ChatXOAuth2Config;
 export type ChatMessage = {
     id: string;
+    fromUserId: string;
     fromDeviceId: DeviceId;
     toDeviceId: DeviceId;
     roomId: string;
@@ -188,6 +189,7 @@ export type ChatDisplayedInput = {
     id?: string;
 };
 export type ChatTypingEvent = {
+    fromUserId: string;
     fromDeviceId: DeviceId;
     toDeviceId?: DeviceId;
     roomId: string;
@@ -196,6 +198,7 @@ export type ChatTypingEvent = {
 };
 export type ChatDeliveryEvent = {
     id: string;
+    fromUserId: string;
     fromDeviceId: DeviceId;
     toDeviceId?: DeviceId;
     roomId: string;
@@ -204,6 +207,7 @@ export type ChatDeliveryEvent = {
 };
 export type ChatErrorEvent = {
     id?: string;
+    fromUserId?: string;
     fromDeviceId?: DeviceId;
     toDeviceId?: DeviceId;
     roomId?: string;

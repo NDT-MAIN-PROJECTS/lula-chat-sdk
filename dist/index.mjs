@@ -394,6 +394,7 @@ var LulaChatClient = class {
     if (!stanza.is?.("message")) return;
     const attrs = stanza.attrs ?? {};
     const fromDeviceId = normalizeBareDeviceId(attrs.from) || attrs.from || "";
+    const fromUserId = normalizeUserIdSegment(fromDeviceId) || "";
     const toDeviceId = attrs.to ? normalizeBareDeviceId(attrs.to) || attrs.to : this.getBareDeviceId();
     const roomId = trimToUndefined(stanza.getChildText?.("thread") ?? void 0);
     this.rememberRoomPeer(roomId, fromDeviceId);
@@ -405,6 +406,7 @@ var LulaChatClient = class {
       if (roomId) {
         this.emit(this.deliveryListeners, {
           id: receiptId,
+          fromUserId,
           fromDeviceId,
           toDeviceId,
           roomId,
@@ -418,6 +420,7 @@ var LulaChatClient = class {
       if (roomId) {
         this.emit(this.deliveryListeners, {
           id: displayed.attrs.id,
+          fromUserId,
           fromDeviceId,
           toDeviceId,
           roomId,
@@ -432,6 +435,7 @@ var LulaChatClient = class {
       this.emit(this.errorListeners, {
         ...errorEvent,
         id: attrs.id,
+        fromUserId: fromUserId || void 0,
         fromDeviceId,
         toDeviceId,
         roomId,
@@ -443,6 +447,7 @@ var LulaChatClient = class {
     const paused = stanza.getChild?.("paused", XMPP_CHATSTATES_NS);
     if ((composing || paused) && roomId) {
       this.emit(this.typingListeners, {
+        fromUserId,
         fromDeviceId,
         toDeviceId,
         roomId,
@@ -460,6 +465,7 @@ var LulaChatClient = class {
     );
     this.emit(this.messageListeners, {
       id: attrs.id || generateMessageId(),
+      fromUserId,
       fromDeviceId,
       toDeviceId,
       roomId,
