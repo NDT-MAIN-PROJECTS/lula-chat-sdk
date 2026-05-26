@@ -351,6 +351,26 @@ var LulaChatClient = class {
   getBareDeviceId() {
     return normalizeBareDeviceId(this.getDeviceId());
   }
+  getAddress() {
+    return this.getChatAddress().address;
+  }
+  getChatAddress() {
+    const raw = this.getDeviceId() ?? this.config.deviceId;
+    return {
+      raw,
+      address: normalizeBareDeviceId(raw) || this.config.deviceId,
+      userId: this.config.userId,
+      deviceId: this.config.localDeviceId,
+      localpart: this.config.username,
+      domain: this.config.domain
+    };
+  }
+  getDomain() {
+    return this.config.domain;
+  }
+  getUserName() {
+    return this.config.username;
+  }
   async connectFresh() {
     this.setStatus("connecting");
     if (this.config.authType === "x-oauth2") {
@@ -1066,6 +1086,8 @@ function normalizeConfig(config) {
   const deviceId = buildXmppDeviceAddress(userId, localDeviceId, domain);
   return {
     service: buildXmppWebSocketUrl(domain, config.xmppWebSocketPath),
+    userId,
+    localDeviceId,
     username,
     deviceId,
     displayName: trimToUndefined(config.displayName),

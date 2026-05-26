@@ -298,6 +298,15 @@ export type ChatStatusEvent = {
   error?: unknown;
 };
 
+export type ChatAddress = {
+  raw: string;
+  address: DeviceId;
+  userId: string;
+  deviceId: DeviceId;
+  localpart: string;
+  domain: string;
+};
+
 export type ChatEncryptInput = {
   toDeviceId: DeviceId;
   body: string;
@@ -397,6 +406,10 @@ export type ChatClient = {
   getStatus: () => ChatStatus;
   getDeviceId: () => DeviceId | undefined;
   getBareDeviceId: () => DeviceId | undefined;
+  getAddress: () => DeviceId;
+  getChatAddress: () => ChatAddress;
+  getDomain: () => string;
+  getUserName: () => string;
 };
 
 type XmppClientLike = ReturnType<typeof createXmppClient>;
@@ -812,6 +825,30 @@ class LulaChatClient implements ChatClient {
 
   public getBareDeviceId(): DeviceId | undefined {
     return normalizeBareDeviceId(this.getDeviceId());
+  }
+
+  public getAddress(): DeviceId {
+    return this.getChatAddress().address;
+  }
+
+  public getChatAddress(): ChatAddress {
+    const raw = this.getDeviceId() ?? this.config.deviceId;
+    return {
+      raw,
+      address: normalizeBareDeviceId(raw) || this.config.deviceId,
+      userId: this.config.userId,
+      deviceId: this.config.localDeviceId,
+      localpart: this.config.username,
+      domain: this.config.domain,
+    };
+  }
+
+  public getDomain(): string {
+    return this.config.domain;
+  }
+
+  public getUserName(): string {
+    return this.config.username;
   }
 
   private async connectFresh(): Promise<void> {
@@ -1674,6 +1711,8 @@ export function createOmemoEncryption(
 
 type NormalizedConfig = {
   service: string;
+  userId: string;
+  localDeviceId: DeviceId;
   username: string;
   deviceId: DeviceId;
   displayName?: string;
@@ -1703,6 +1742,8 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
 
   return {
     service: buildXmppWebSocketUrl(domain, config.xmppWebSocketPath),
+    userId,
+    localDeviceId,
     username,
     deviceId,
     displayName: trimToUndefined(config.displayName),

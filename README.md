@@ -30,7 +30,10 @@ const {
   sendFormSubmission,
   sendTyping,
   markRead,
+  getChatAddress,
 } = chatClient;
+
+const ownAddress = getChatAddress();
 
 onChatMessage((message) => {
   console.log(message.fromUserId, message.fromDeviceId, message.body);
@@ -122,6 +125,10 @@ Allowed resources:
 - `onDelivery(listener)` for delivered and read events.
 - `onError(listener)` for stanza and runtime errors.
 - `onStatus(listener)` for connection state.
+- `getAddress()` for the current bare chat address.
+- `getChatAddress()` for the current chat address, user id, device id, localpart, and domain.
+- `getDomain()` for the normalized chat domain.
+- `getUserName()` for the derived transport username.
 - `sendChatMessage({ roomId, body })` to send human chat text.
 - `sendFormSubmission({ roomId, payload })` to send a JSON form submission payload.
 - `sendMessage({ roomId, body })` to send a chat message.

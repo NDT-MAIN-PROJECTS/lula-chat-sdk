@@ -221,6 +221,14 @@ export type ChatStatusEvent = {
     deviceId?: DeviceId;
     error?: unknown;
 };
+export type ChatAddress = {
+    raw: string;
+    address: DeviceId;
+    userId: string;
+    deviceId: DeviceId;
+    localpart: string;
+    domain: string;
+};
 export type ChatEncryptInput = {
     toDeviceId: DeviceId;
     body: string;
@@ -299,6 +307,10 @@ export type ChatClient = {
     getStatus: () => ChatStatus;
     getDeviceId: () => DeviceId | undefined;
     getBareDeviceId: () => DeviceId | undefined;
+    getAddress: () => DeviceId;
+    getChatAddress: () => ChatAddress;
+    getDomain: () => string;
+    getUserName: () => string;
 };
 type XmppChild = ReturnType<typeof xml>;
 type XmppElementLike = {
