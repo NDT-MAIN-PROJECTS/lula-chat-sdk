@@ -578,9 +578,10 @@ var LulaChatClient = class {
     this.resolvePendingIq(stanza);
     if (!stanza.is?.("message")) return;
     const attrs = stanza.attrs ?? {};
-    const fromDeviceId = normalizeBareDeviceId(attrs.from) || attrs.from || "";
-    const fromUserId = normalizeUserIdSegment(fromDeviceId) || "";
-    const toDeviceId = attrs.to ? normalizeBareDeviceId(attrs.to) || attrs.to : this.getBareDeviceId();
+    const fromFullAddress = normalizeBareDeviceId(addressToString(attrs.from));
+    const fromDeviceId = fromFullAddress;
+    const fromUserId = getUserIdFromChatAddress(fromFullAddress) || "";
+    const toDeviceId = attrs.to ? normalizeBareDeviceId(addressToString(attrs.to)) || addressToString(attrs.to) : this.getBareDeviceId();
     const roomId = trimToUndefined(stanza.getChildText?.("thread") ?? void 0);
     this.rememberRoomPeer(roomId, fromDeviceId);
     this.log("debug", "chat_message_stanza_received", {
@@ -599,6 +600,7 @@ var LulaChatClient = class {
         this.emit(this.deliveryListeners, {
           id: receiptId,
           fromUserId,
+          fromFullAddress,
           fromDeviceId,
           toDeviceId,
           roomId,
@@ -624,6 +626,7 @@ var LulaChatClient = class {
         this.emit(this.deliveryListeners, {
           id: displayed.attrs.id,
           fromUserId,
+          fromFullAddress,
           fromDeviceId,
           toDeviceId,
           roomId,
@@ -656,6 +659,7 @@ var LulaChatClient = class {
         ...errorEvent,
         id: attrs.id,
         fromUserId: fromUserId || void 0,
+        fromFullAddress: fromFullAddress || void 0,
         fromDeviceId,
         toDeviceId,
         roomId,
@@ -668,6 +672,7 @@ var LulaChatClient = class {
     if ((composing || paused) && roomId) {
       this.emit(this.typingListeners, {
         fromUserId,
+        fromFullAddress,
         fromDeviceId,
         toDeviceId,
         roomId,
@@ -708,6 +713,7 @@ var LulaChatClient = class {
     this.emit(this.messageListeners, {
       id: emittedMessageId,
       fromUserId,
+      fromFullAddress,
       fromDeviceId,
       toDeviceId,
       roomId,
@@ -1834,6 +1840,13 @@ function normalizeUserIdSegment(value) {
   const withoutPrefix = localpart?.replace(/^i\./, "");
   return withoutPrefix?.replace(/\.d\..*$/, "") || void 0;
 }
+function getUserIdFromChatAddress(value) {
+  const localpart = normalizeBareDeviceId(value).split("@")[0]?.trim();
+  if (!localpart) return void 0;
+  const withoutPrefix = localpart.startsWith("i.") ? localpart.slice(2) : localpart;
+  const deviceMarker = withoutPrefix.indexOf(".d.");
+  return (deviceMarker >= 0 ? withoutPrefix.slice(0, deviceMarker) : withoutPrefix) || void 0;
+}
 function normalizeDeviceIdSegment(value) {
   const trimmed = trimToUndefined(value);
   if (!trimmed) return void 0;
@@ -1842,7 +1855,7 @@ function normalizeDeviceIdSegment(value) {
   return deviceMarker >= 0 ? localpart?.slice(deviceMarker + 3) || void 0 : localpart;
 }
 function normalizeBareDeviceId(deviceId) {
-  return deviceId?.trim().split("/")[0] ?? "";
+  return addressToString(deviceId)?.trim().split("/")[0] ?? "";
 }
 function trimToUndefined(value) {
   const trimmed = value?.trim();

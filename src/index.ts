@@ -247,6 +247,7 @@ export type ChatClientConfig = ChatPasswordAuthConfig | ChatXOAuth2Config;
 export type ChatMessage = {
   id: string;
   fromUserId: string;
+  fromFullAddress: string;
   fromDeviceId: DeviceId;
   toDeviceId: DeviceId;
   roomId: string;
@@ -361,6 +362,7 @@ export type ChatDisplayedInput = {
 
 export type ChatTypingEvent = {
   fromUserId: string;
+  fromFullAddress: string;
   fromDeviceId: DeviceId;
   toDeviceId?: DeviceId;
   roomId: string;
@@ -371,6 +373,7 @@ export type ChatTypingEvent = {
 export type ChatDeliveryEvent = {
   id: string;
   fromUserId: string;
+  fromFullAddress: string;
   fromDeviceId: DeviceId;
   toDeviceId?: DeviceId;
   roomId: string;
@@ -381,6 +384,7 @@ export type ChatDeliveryEvent = {
 export type ChatErrorEvent = {
   id?: string;
   fromUserId?: string;
+  fromFullAddress?: string;
   fromDeviceId?: DeviceId;
   toDeviceId?: DeviceId;
   roomId?: string;
@@ -1269,10 +1273,11 @@ class LulaChatClient implements ChatClient {
     if (!stanza.is?.("message")) return;
 
     const attrs = stanza.attrs ?? {};
-    const fromDeviceId = normalizeBareDeviceId(attrs.from) || attrs.from || "";
-    const fromUserId = normalizeUserIdSegment(fromDeviceId) || "";
+    const fromFullAddress = normalizeBareDeviceId(addressToString(attrs.from));
+    const fromDeviceId = fromFullAddress;
+    const fromUserId = getUserIdFromChatAddress(fromFullAddress) || "";
     const toDeviceId = attrs.to
-      ? normalizeBareDeviceId(attrs.to) || attrs.to
+      ? normalizeBareDeviceId(addressToString(attrs.to)) || addressToString(attrs.to)
       : this.getBareDeviceId();
     const roomId = trimToUndefined(stanza.getChildText?.("thread") ?? undefined);
     this.rememberRoomPeer(roomId, fromDeviceId);
@@ -1293,6 +1298,7 @@ class LulaChatClient implements ChatClient {
         this.emit(this.deliveryListeners, {
           id: receiptId,
           fromUserId,
+          fromFullAddress,
           fromDeviceId,
           toDeviceId,
           roomId,
@@ -1319,6 +1325,7 @@ class LulaChatClient implements ChatClient {
         this.emit(this.deliveryListeners, {
           id: displayed.attrs.id,
           fromUserId,
+          fromFullAddress,
           fromDeviceId,
           toDeviceId,
           roomId,
@@ -1352,6 +1359,7 @@ class LulaChatClient implements ChatClient {
         ...errorEvent,
         id: attrs.id,
         fromUserId: fromUserId || undefined,
+        fromFullAddress: fromFullAddress || undefined,
         fromDeviceId,
         toDeviceId,
         roomId,
@@ -1365,6 +1373,7 @@ class LulaChatClient implements ChatClient {
     if ((composing || paused) && roomId) {
       this.emit(this.typingListeners, {
         fromUserId,
+        fromFullAddress,
         fromDeviceId,
         toDeviceId,
         roomId,
@@ -1407,6 +1416,7 @@ class LulaChatClient implements ChatClient {
     this.emit(this.messageListeners, {
       id: emittedMessageId,
       fromUserId,
+      fromFullAddress,
       fromDeviceId,
       toDeviceId,
       roomId,
@@ -2856,6 +2866,14 @@ function normalizeUserIdSegment(value?: string): string | undefined {
   return withoutPrefix?.replace(/\.d\..*$/, "") || undefined;
 }
 
+function getUserIdFromChatAddress(value?: string): string | undefined {
+  const localpart = normalizeBareDeviceId(value).split("@")[0]?.trim();
+  if (!localpart) return undefined;
+  const withoutPrefix = localpart.startsWith("i.") ? localpart.slice(2) : localpart;
+  const deviceMarker = withoutPrefix.indexOf(".d.");
+  return (deviceMarker >= 0 ? withoutPrefix.slice(0, deviceMarker) : withoutPrefix) || undefined;
+}
+
 function normalizeDeviceIdSegment(value?: string): string | undefined {
   const trimmed = trimToUndefined(value);
   if (!trimmed) return undefined;
@@ -2865,7 +2883,7 @@ function normalizeDeviceIdSegment(value?: string): string | undefined {
 }
 
 function normalizeBareDeviceId(deviceId?: string | null): DeviceId {
-  return deviceId?.trim().split("/")[0] ?? "";
+  return addressToString(deviceId)?.trim().split("/")[0] ?? "";
 }
 
 function trimToUndefined(value?: string | null): string | undefined {
