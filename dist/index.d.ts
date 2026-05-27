@@ -298,6 +298,14 @@ export type ChatAddress = {
     localpart: string;
     domain: string;
 };
+export type ChatAddressInput = {
+    xmppDomain: string;
+    userId: string;
+    deviceId: DeviceId;
+};
+export type CreateDeviceIdOptions = {
+    prefix?: string;
+};
 export type ChatEncryptInput = {
     toDeviceId: DeviceId;
     body: string;
@@ -407,6 +415,8 @@ type XmppElementLike = {
 };
 export declare function init(config: ChatClientConfig): ChatClient;
 export declare function createChatClient(config: ChatClientConfig): ChatClient;
+export declare function createDeviceId(options?: CreateDeviceIdOptions): DeviceId;
+export declare function getChatAddress(input: ChatAddressInput): ChatAddress;
 export declare function createRoomDirectory(options: ChatRoomDirectoryOptions): ChatRoomDirectory;
 export declare function createOmemoEncryption(options?: OmemoEncryptionOptions): ChatEncryption;
 export declare function extractProviderChatRoomId(metadata?: Record<string, unknown>): string | undefined;

@@ -2,7 +2,9 @@ import { gcm } from "@noble/ciphers/aes.js";
 import { x25519 } from "@noble/curves/ed25519.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { randomBytes as nobleRandomBytes } from "@noble/hashes/utils.js";
 import { client as createXmppClient, xml } from "@xmpp/client";
+import { customAlphabet } from "nanoid/non-secure";
 import saslMechanisms from "saslmechanisms";
 
 export type Unsubscribe = () => void;
@@ -398,6 +400,16 @@ export type ChatAddress = {
   domain: string;
 };
 
+export type ChatAddressInput = {
+  xmppDomain: string;
+  userId: string;
+  deviceId: DeviceId;
+};
+
+export type CreateDeviceIdOptions = {
+  prefix?: string;
+};
+
 export type ChatEncryptInput = {
   toDeviceId: DeviceId;
   body: string;
@@ -557,6 +569,8 @@ const DEFAULT_IQ_TIMEOUT_MS = 15000;
 const DEFAULT_TYPING_AUTO_PAUSE_MS = 10000;
 const DEFAULT_OMEMO_STATE_KEY_PREFIX = "chat_sdk_omemo_state";
 const DEFAULT_XMPP_WEBSOCKET_PATH = "/chat/websocket";
+const createRuntimeIdSuffix = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 12);
+const createDeviceIdSuffix = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);
 
 class XOauth2Mechanism {
   public name = "X-OAUTH2";
@@ -613,6 +627,34 @@ export function init(config: ChatClientConfig): ChatClient {
 
 export function createChatClient(config: ChatClientConfig): ChatClient {
   return init(config);
+}
+
+export function createDeviceId(options: CreateDeviceIdOptions = {}): DeviceId {
+  const prefix = normalizeDeviceIdSegment(options.prefix) ?? "";
+  return `${prefix}${createDeviceIdSuffix()}`;
+}
+
+export function getChatAddress(input: ChatAddressInput): ChatAddress {
+  const domain = normalizeXmppDomain(input.xmppDomain);
+  if (!domain) throw new Error("chat_xmpp_domain_required");
+
+  const userId = normalizeUserIdSegment(input.userId);
+  if (!userId) throw new Error("chat_user_id_required");
+
+  const localDeviceId = normalizeDeviceIdSegment(input.deviceId);
+  if (!localDeviceId) throw new Error("chat_device_id_required");
+
+  const localpart = buildXmppLocalpart(userId, localDeviceId);
+  const address = buildXmppDeviceAddress(userId, localDeviceId, domain);
+
+  return {
+    raw: address,
+    address,
+    userId,
+    deviceId: localDeviceId,
+    localpart,
+    domain,
+  };
 }
 
 export function createRoomDirectory(options: ChatRoomDirectoryOptions): ChatRoomDirectory {
@@ -1555,7 +1597,7 @@ class LulaChatClient implements ChatClient {
 
 type OmemoState = {
   bareJid: string;
-  deviceId: number;
+  omemoDeviceId: number;
   identityPrivateKey: string;
   identityPublicKey: string;
 };
@@ -1590,11 +1632,11 @@ export function createOmemoEncryption(
       }
     }
 
-    const privateKey = getRandomBytes(32);
+    const privateKey = nobleRandomBytes(32);
     const publicKey = x25519.getPublicKey(privateKey);
     const nextState: OmemoState = {
       bareJid,
-      deviceId: Math.max(1, bytesToUint32(getRandomBytes(4))),
+      omemoDeviceId: Math.max(1, bytesToUint32(nobleRandomBytes(4))),
       identityPrivateKey: bytesToBase64(privateKey),
       identityPublicKey: bytesToBase64(publicKey),
     };
@@ -1680,7 +1722,7 @@ export function createOmemoEncryption(
 
     const state = await loadOrCreateState(bareJid);
     const existingIds = await fetchDeviceIds(context, bareJid).catch(() => []);
-    const finalDeviceIds = Array.from(new Set([state.deviceId, ...existingIds])).filter(
+    const finalDeviceIds = Array.from(new Set([state.omemoDeviceId, ...existingIds])).filter(
       (value) => Number.isFinite(value) && value > 0,
     );
 
@@ -1729,7 +1771,7 @@ export function createOmemoEncryption(
         { xmlns: PUBSUB_NS },
         xml(
           "publish",
-          { node: `${OMEMO_BUNDLE_NODE_PREFIX}${state.deviceId}` },
+          { node: `${OMEMO_BUNDLE_NODE_PREFIX}${state.omemoDeviceId}` },
           xml(
             "item",
             { id: "current" },
@@ -1805,8 +1847,8 @@ export function createOmemoEncryption(
 
       const state = await loadOrCreateState(bareJid);
       const sessions = await establishPeerSessions(context, input.toDeviceId);
-      const iv = getRandomBytes(12);
-      const contentKey = getRandomBytes(OMEMO_AES_KEY_BYTES);
+      const iv = nobleRandomBytes(12);
+      const contentKey = nobleRandomBytes(OMEMO_AES_KEY_BYTES);
       const plaintext = new TextEncoder().encode(
         JSON.stringify({
           body: input.body,
@@ -1819,7 +1861,7 @@ export function createOmemoEncryption(
       const ciphertext = gcm(contentKey, iv).encrypt(plaintext);
 
       const keyElements = sessions.map((session) => {
-        const wrapSalt = getRandomBytes(OMEMO_KEY_WRAP_BYTES);
+        const wrapSalt = nobleRandomBytes(OMEMO_KEY_WRAP_BYTES);
         const wrapMask = hkdf(
           sha256,
           session.sharedSecret,
@@ -1847,7 +1889,7 @@ export function createOmemoEncryption(
             { xmlns: OMEMO_NS },
             xml(
               "header",
-              { sid: String(state.deviceId) },
+              { sid: String(state.omemoDeviceId) },
               ...keyElements,
               xml("iv", {}, bytesToBase64(iv)),
               xml("identity", {}, state.identityPublicKey),
@@ -1875,7 +1917,7 @@ export function createOmemoEncryption(
       let selectedKeyBase64 = "";
       for (const keyElement of keys) {
         const rid = Number(keyElement.attrs?.rid ?? "0");
-        if (rid !== state.deviceId) continue;
+        if (rid !== state.omemoDeviceId) continue;
         selectedKeyBase64 = keyElement.getText?.().trim() || "";
         if (selectedKeyBase64) break;
       }
@@ -2527,11 +2569,11 @@ function parseMetadataTimestamp(metadata?: Record<string, unknown>): number | un
 }
 
 function generateMessageId(): string {
-  return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `msg-${Date.now()}-${createRuntimeIdSuffix()}`;
 }
 
 function generateIqId(): string {
-  return `iq-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `iq-${Date.now()}-${createRuntimeIdSuffix()}`;
 }
 
 function parseUploadSlotResponse(stanza: XmppElementLike): ChatAttachmentUploadSlot {
@@ -2825,9 +2867,9 @@ function isValidOmemoState(value: unknown): value is OmemoState {
   return (
     typeof value.bareJid === "string" &&
     value.bareJid.length > 0 &&
-    typeof value.deviceId === "number" &&
-    Number.isFinite(value.deviceId) &&
-    value.deviceId > 0 &&
+    typeof value.omemoDeviceId === "number" &&
+    Number.isFinite(value.omemoDeviceId) &&
+    value.omemoDeviceId > 0 &&
     typeof value.identityPrivateKey === "string" &&
     value.identityPrivateKey.length > 0 &&
     typeof value.identityPublicKey === "string" &&
@@ -2963,14 +3005,6 @@ export const storageBackends = {
   createIndexDb: createIndexDbStorageBackend,
   createMongoDb: createMongoDbStorageBackend,
 };
-
-function getRandomBytes(length: number): Uint8Array {
-  const cryptoObject = globalThis.crypto;
-  if (!cryptoObject?.getRandomValues) {
-    throw new Error("chat_random_values_unavailable");
-  }
-  return cryptoObject.getRandomValues(new Uint8Array(length));
-}
 
 function bytesToBase64(bytes: Uint8Array): string {
   const globalWithBuffer = globalThis as typeof globalThis & {

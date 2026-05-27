@@ -34,6 +34,7 @@ __export(index_exports, {
   buildFormSubmissionMetadata: () => buildFormSubmissionMetadata,
   chatResources: () => chatResources,
   createChatClient: () => createChatClient,
+  createDeviceId: () => createDeviceId,
   createIndexDbStorageBackend: () => createIndexDbStorageBackend,
   createMemoryStorageBackend: () => createMemoryStorageBackend,
   createMongoDbStorageBackend: () => createMongoDbStorageBackend,
@@ -42,6 +43,7 @@ __export(index_exports, {
   extractDisplayName: () => extractDisplayName,
   extractProviderChatRoomId: () => extractProviderChatRoomId,
   extractSubmissionId: () => extractSubmissionId,
+  getChatAddress: () => getChatAddress,
   init: () => init,
   storageBackends: () => storageBackends
 });
@@ -50,7 +52,9 @@ var import_aes = require("@noble/ciphers/aes.js");
 var import_ed25519 = require("@noble/curves/ed25519.js");
 var import_hkdf = require("@noble/hashes/hkdf.js");
 var import_sha2 = require("@noble/hashes/sha2.js");
+var import_utils = require("@noble/hashes/utils.js");
 var import_client = require("@xmpp/client");
+var import_non_secure = require("nanoid/non-secure");
 var import_saslmechanisms = __toESM(require("saslmechanisms"), 1);
 var chatResources = [
   "server-client",
@@ -79,6 +83,8 @@ var DEFAULT_IQ_TIMEOUT_MS = 15e3;
 var DEFAULT_TYPING_AUTO_PAUSE_MS = 1e4;
 var DEFAULT_OMEMO_STATE_KEY_PREFIX = "chat_sdk_omemo_state";
 var DEFAULT_XMPP_WEBSOCKET_PATH = "/chat/websocket";
+var createRuntimeIdSuffix = (0, import_non_secure.customAlphabet)("0123456789abcdefghijklmnopqrstuvwxyz", 12);
+var createDeviceIdSuffix = (0, import_non_secure.customAlphabet)("0123456789abcdefghijklmnopqrstuvwxyz", 16);
 var XOauth2Mechanism = class {
   name = "X-OAUTH2";
   clientFirst = true;
@@ -118,6 +124,28 @@ function init(config) {
 }
 function createChatClient(config) {
   return init(config);
+}
+function createDeviceId(options = {}) {
+  const prefix = normalizeDeviceIdSegment(options.prefix) ?? "";
+  return `${prefix}${createDeviceIdSuffix()}`;
+}
+function getChatAddress(input) {
+  const domain = normalizeXmppDomain(input.xmppDomain);
+  if (!domain) throw new Error("chat_xmpp_domain_required");
+  const userId = normalizeUserIdSegment(input.userId);
+  if (!userId) throw new Error("chat_user_id_required");
+  const localDeviceId = normalizeDeviceIdSegment(input.deviceId);
+  if (!localDeviceId) throw new Error("chat_device_id_required");
+  const localpart = buildXmppLocalpart(userId, localDeviceId);
+  const address = buildXmppDeviceAddress(userId, localDeviceId, domain);
+  return {
+    raw: address,
+    address,
+    userId,
+    deviceId: localDeviceId,
+    localpart,
+    domain
+  };
 }
 function createRoomDirectory(options) {
   const roomCache = /* @__PURE__ */ new Map();
@@ -874,11 +902,11 @@ function createOmemoEncryption(options = {}) {
       } catch {
       }
     }
-    const privateKey = getRandomBytes(32);
+    const privateKey = (0, import_utils.randomBytes)(32);
     const publicKey = import_ed25519.x25519.getPublicKey(privateKey);
     const nextState = {
       bareJid,
-      deviceId: Math.max(1, bytesToUint32(getRandomBytes(4))),
+      omemoDeviceId: Math.max(1, bytesToUint32((0, import_utils.randomBytes)(4))),
       identityPrivateKey: bytesToBase64(privateKey),
       identityPublicKey: bytesToBase64(publicKey)
     };
@@ -950,7 +978,7 @@ function createOmemoEncryption(options = {}) {
     if (!bareJid) return;
     const state = await loadOrCreateState(bareJid);
     const existingIds = await fetchDeviceIds(context, bareJid).catch(() => []);
-    const finalDeviceIds = Array.from(/* @__PURE__ */ new Set([state.deviceId, ...existingIds])).filter(
+    const finalDeviceIds = Array.from(/* @__PURE__ */ new Set([state.omemoDeviceId, ...existingIds])).filter(
       (value) => Number.isFinite(value) && value > 0
     );
     const publishOptions = (0, import_client.xml)(
@@ -996,7 +1024,7 @@ function createOmemoEncryption(options = {}) {
         { xmlns: PUBSUB_NS },
         (0, import_client.xml)(
           "publish",
-          { node: `${OMEMO_BUNDLE_NODE_PREFIX}${state.deviceId}` },
+          { node: `${OMEMO_BUNDLE_NODE_PREFIX}${state.omemoDeviceId}` },
           (0, import_client.xml)(
             "item",
             { id: "current" },
@@ -1059,8 +1087,8 @@ function createOmemoEncryption(options = {}) {
       }
       const state = await loadOrCreateState(bareJid);
       const sessions = await establishPeerSessions(context, input.toDeviceId);
-      const iv = getRandomBytes(12);
-      const contentKey = getRandomBytes(OMEMO_AES_KEY_BYTES);
+      const iv = (0, import_utils.randomBytes)(12);
+      const contentKey = (0, import_utils.randomBytes)(OMEMO_AES_KEY_BYTES);
       const plaintext = new TextEncoder().encode(
         JSON.stringify({
           body: input.body,
@@ -1070,7 +1098,7 @@ function createOmemoEncryption(options = {}) {
       );
       const ciphertext = (0, import_aes.gcm)(contentKey, iv).encrypt(plaintext);
       const keyElements = sessions.map((session) => {
-        const wrapSalt = getRandomBytes(OMEMO_KEY_WRAP_BYTES);
+        const wrapSalt = (0, import_utils.randomBytes)(OMEMO_KEY_WRAP_BYTES);
         const wrapMask = (0, import_hkdf.hkdf)(
           import_sha2.sha256,
           session.sharedSecret,
@@ -1097,7 +1125,7 @@ function createOmemoEncryption(options = {}) {
             { xmlns: OMEMO_NS },
             (0, import_client.xml)(
               "header",
-              { sid: String(state.deviceId) },
+              { sid: String(state.omemoDeviceId) },
               ...keyElements,
               (0, import_client.xml)("iv", {}, bytesToBase64(iv)),
               (0, import_client.xml)("identity", {}, state.identityPublicKey)
@@ -1122,7 +1150,7 @@ function createOmemoEncryption(options = {}) {
       let selectedKeyBase64 = "";
       for (const keyElement of keys) {
         const rid = Number(keyElement.attrs?.rid ?? "0");
-        if (rid !== state.deviceId) continue;
+        if (rid !== state.omemoDeviceId) continue;
         selectedKeyBase64 = keyElement.getText?.().trim() || "";
         if (selectedKeyBase64) break;
       }
@@ -1596,10 +1624,10 @@ function parseMetadataTimestamp(metadata) {
   return Number.isFinite(parsed) ? parsed : void 0;
 }
 function generateMessageId() {
-  return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `msg-${Date.now()}-${createRuntimeIdSuffix()}`;
 }
 function generateIqId() {
-  return `iq-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `iq-${Date.now()}-${createRuntimeIdSuffix()}`;
 }
 function parseUploadSlotResponse(stanza) {
   const raw = toRawXmlString(stanza);
@@ -1830,7 +1858,7 @@ function expandDeviceIdCandidate(value, xmppDomain, userId) {
 }
 function isValidOmemoState(value) {
   if (!isRecord(value)) return false;
-  return typeof value.bareJid === "string" && value.bareJid.length > 0 && typeof value.deviceId === "number" && Number.isFinite(value.deviceId) && value.deviceId > 0 && typeof value.identityPrivateKey === "string" && value.identityPrivateKey.length > 0 && typeof value.identityPublicKey === "string" && value.identityPublicKey.length > 0;
+  return typeof value.bareJid === "string" && value.bareJid.length > 0 && typeof value.omemoDeviceId === "number" && Number.isFinite(value.omemoDeviceId) && value.omemoDeviceId > 0 && typeof value.identityPrivateKey === "string" && value.identityPrivateKey.length > 0 && typeof value.identityPublicKey === "string" && value.identityPublicKey.length > 0;
 }
 function createInMemoryKeyValueStore() {
   const map = /* @__PURE__ */ new Map();
@@ -1942,13 +1970,6 @@ var storageBackends = {
   createIndexDb: createIndexDbStorageBackend,
   createMongoDb: createMongoDbStorageBackend
 };
-function getRandomBytes(length) {
-  const cryptoObject = globalThis.crypto;
-  if (!cryptoObject?.getRandomValues) {
-    throw new Error("chat_random_values_unavailable");
-  }
-  return cryptoObject.getRandomValues(new Uint8Array(length));
-}
 function bytesToBase64(bytes) {
   const globalWithBuffer = globalThis;
   if (globalWithBuffer.Buffer) {
@@ -2039,6 +2060,7 @@ function decodeJsonBase64(value) {
   buildFormSubmissionMetadata,
   chatResources,
   createChatClient,
+  createDeviceId,
   createIndexDbStorageBackend,
   createMemoryStorageBackend,
   createMongoDbStorageBackend,
@@ -2047,6 +2069,7 @@ function decodeJsonBase64(value) {
   extractDisplayName,
   extractProviderChatRoomId,
   extractSubmissionId,
+  getChatAddress,
   init,
   storageBackends
 });
