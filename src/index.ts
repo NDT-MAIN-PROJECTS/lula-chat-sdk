@@ -37,6 +37,8 @@ export const chatResources = [
 
 export type ChatResource = (typeof chatResources)[number];
 
+export type ChatLogLevel = "silent" | "error" | "warn" | "info" | "debug";
+
 export type ChatLogger = {
   debug?: (message: string, data?: Record<string, unknown>) => void;
   info?: (message: string, data?: Record<string, unknown>) => void;
@@ -207,6 +209,9 @@ export type ChatClientBaseConfig = {
 
   /** Optional logger for connection, encryption, and stanza errors. */
   logger?: ChatLogger;
+
+  /** Logger verbosity. Defaults to "error" when a logger is provided. */
+  logLevel?: ChatLogLevel;
 
   /** Message encryption adapter. Pass createOmemoEncryption(...) for built-in OMEMO. */
   encryption: ChatEncryption;
@@ -569,6 +574,13 @@ const DEFAULT_IQ_TIMEOUT_MS = 15000;
 const DEFAULT_TYPING_AUTO_PAUSE_MS = 10000;
 const DEFAULT_OMEMO_STATE_KEY_PREFIX = "chat_sdk_omemo_state";
 const DEFAULT_XMPP_WEBSOCKET_PATH = "/chat/websocket";
+const CHAT_LOG_LEVEL_WEIGHT: Record<ChatLogLevel, number> = {
+  silent: 0,
+  error: 1,
+  warn: 2,
+  info: 3,
+  debug: 4,
+};
 const createRuntimeIdSuffix = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 12);
 const createDeviceIdSuffix = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);
 
@@ -726,6 +738,11 @@ class LulaChatClient implements ChatClient {
     if (this.status === "online" && this.xmpp) return;
     if (this.connectPromise) return this.connectPromise;
 
+    this.log("debug", "chat_connect_requested", {
+      status: this.status,
+      deviceId: this.config.localDeviceId,
+      domain: this.config.domain,
+    });
     this.connectPromise = this.connectFresh();
     try {
       await this.connectPromise;
@@ -735,6 +752,7 @@ class LulaChatClient implements ChatClient {
   }
 
   public async stop(): Promise<void> {
+    this.log("info", "chat_stop_requested", { status: this.status });
     this.setStatus("stopping");
     for (const timer of this.typingAutoPauseTimers.values()) {
       clearTimeout(timer);
@@ -747,10 +765,16 @@ class LulaChatClient implements ChatClient {
       await current.stop();
     }
     this.setStatus("offline");
+    this.log("info", "chat_stopped");
   }
 
   public async getPeerDeviceIds(roomId: string): Promise<DeviceId[]> {
-    return this.resolveRoomDeviceIds(roomId);
+    const deviceIds = await this.resolveRoomDeviceIds(roomId);
+    this.log("debug", "chat_peer_device_ids_resolved", {
+      roomId,
+      deviceCount: deviceIds.length,
+    });
+    return deviceIds;
   }
 
   public async getOrCreateRoom(
@@ -761,7 +785,12 @@ class LulaChatClient implements ChatClient {
       typeof inputOrUserId === "string"
         ? { userId: inputOrUserId, metadata }
         : inputOrUserId;
-    return this.resolveRoomForUserId(input);
+    const room = await this.resolveRoomForUserId(input);
+    this.log("debug", "chat_room_resolved_for_user", {
+      userId: input.userId,
+      roomId: room.roomId,
+    });
+    return room;
   }
 
   public async sendChatMessage(
@@ -878,6 +907,14 @@ class LulaChatClient implements ChatClient {
       roomId: targetRoomId,
       explicitDeviceIds: collectTargetDeviceIds(input),
     });
+    this.log("debug", "chat_message_send_started", {
+      id,
+      roomId,
+      targetRoomId,
+      targetCount: targetDeviceIds.length,
+      hasAttachments: Boolean(attachments?.length),
+      messageType: metadata.messageType,
+    });
 
     await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
       const encodedPayload = await this.encodePayload({
@@ -898,6 +935,13 @@ class LulaChatClient implements ChatClient {
       }
 
       await xmpp.send(xml("message", { to: toDeviceId, type: "chat", id }, ...children));
+    });
+    this.log("info", "chat_message_sent", {
+      id,
+      roomId,
+      targetRoomId,
+      targetCount: targetDeviceIds.length,
+      messageType: metadata.messageType,
     });
     this.rememberRoomPeers(roomId, targetDeviceIds);
     if (targetRoomId && targetRoomId !== roomId) {
@@ -922,6 +966,11 @@ class LulaChatClient implements ChatClient {
       explicitDeviceIds: collectTargetDeviceIds(input),
     });
 
+    this.log("debug", "chat_typing_send_started", {
+      roomId,
+      isTyping,
+      targetCount: targetDeviceIds.length,
+    });
     this.rememberRoomPeers(roomId, targetDeviceIds);
     this.clearTypingAutoPause(roomId);
     await this.connect();
@@ -941,6 +990,11 @@ class LulaChatClient implements ChatClient {
     if (isTyping) {
       this.scheduleTypingAutoPause(roomId, input.autoPauseMs ?? DEFAULT_TYPING_AUTO_PAUSE_MS);
     }
+    this.log("debug", "chat_typing_sent", {
+      roomId,
+      isTyping,
+      targetCount: targetDeviceIds.length,
+    });
   }
 
   public async markRead(
@@ -960,6 +1014,11 @@ class LulaChatClient implements ChatClient {
       explicitDeviceIds: collectTargetDeviceIds(input),
     });
 
+    this.log("debug", "chat_read_marker_send_started", {
+      roomId,
+      messageId: input.messageId,
+      targetCount: targetDeviceIds.length,
+    });
     this.rememberRoomPeers(roomId, targetDeviceIds);
     await this.connect();
     const children: XmppChild[] = [
@@ -975,6 +1034,11 @@ class LulaChatClient implements ChatClient {
         }, ...children),
       ),
     );
+    this.log("debug", "chat_read_marker_sent", {
+      roomId,
+      messageId: input.messageId,
+      targetCount: targetDeviceIds.length,
+    });
   }
 
   public async resolveAttachment(attachment: ChatAttachment): Promise<string | null> {
@@ -1074,6 +1138,12 @@ class LulaChatClient implements ChatClient {
 
   private async connectFresh(): Promise<void> {
     this.setStatus("connecting");
+    this.log("info", "chat_connect_started", {
+      service: this.config.service,
+      domain: this.config.domain,
+      resource: this.config.resource,
+      authType: this.config.authType,
+    });
     if (this.config.authType === "x-oauth2") {
       registerXOAuth2Preference();
     }
@@ -1099,6 +1169,7 @@ class LulaChatClient implements ChatClient {
     } catch (error) {
       this.xmpp = null;
       this.setStatus("error", error);
+      this.log("error", "chat_connect_failed", { error });
       await safeStop(xmpp);
       throw error;
     }
@@ -1157,10 +1228,18 @@ class LulaChatClient implements ChatClient {
     xmpp.on("online", async (address: unknown) => {
       this.onlineDeviceId = addressToString(address) ?? this.config.deviceId;
       this.setStatus("online");
+      this.log("info", "chat_online", {
+        deviceId: this.onlineDeviceId,
+        bareDeviceId: this.getBareDeviceId(),
+      });
       await xmpp.send(xml("presence"));
       try {
         await this.config.encryption?.onConnect?.(this.getEncryptionContext());
+        this.log("debug", "chat_encryption_connected", {
+          deviceId: this.getBareDeviceId(),
+        });
       } catch (error) {
+        this.log("error", "chat_encryption_connect_failed", { error });
         this.emit(this.errorListeners, { error });
       }
     });
@@ -1168,10 +1247,12 @@ class LulaChatClient implements ChatClient {
     xmpp.on("offline", () => {
       this.setStatus("offline");
       this.onlineDeviceId = undefined;
+      this.log("warn", "chat_offline");
       this.rejectPendingIq(new Error("chat_iq_offline"));
     });
 
     xmpp.on("error", (error: unknown) => {
+      this.log("error", "chat_xmpp_error", { error });
       this.emit(this.errorListeners, { error });
       this.setStatus("error", error);
     });
@@ -1195,6 +1276,13 @@ class LulaChatClient implements ChatClient {
       : this.getBareDeviceId();
     const roomId = trimToUndefined(stanza.getChildText?.("thread") ?? undefined);
     this.rememberRoomPeer(roomId, fromDeviceId);
+    this.log("debug", "chat_message_stanza_received", {
+      id: attrs.id,
+      type: attrs.type,
+      fromDeviceId,
+      toDeviceId,
+      roomId,
+    });
 
     const receipt = stanza.getChild?.("received", XMPP_RECEIPTS_NS);
     const markerReceived = stanza.getChild?.("received", XMPP_CHAT_MARKERS_NS);
@@ -1211,6 +1299,17 @@ class LulaChatClient implements ChatClient {
           status: "delivered",
           raw: stanza,
         });
+        this.log("debug", "chat_delivery_received", {
+          id: receiptId,
+          roomId,
+          status: "delivered",
+          fromDeviceId,
+        });
+      } else {
+        this.log("debug", "chat_delivery_ignored_missing_room", {
+          id: receiptId,
+          fromDeviceId,
+        });
       }
       return;
     }
@@ -1226,12 +1325,29 @@ class LulaChatClient implements ChatClient {
           status: "read",
           raw: stanza,
         });
+        this.log("debug", "chat_delivery_received", {
+          id: displayed.attrs.id,
+          roomId,
+          status: "read",
+          fromDeviceId,
+        });
+      } else {
+        this.log("debug", "chat_read_marker_ignored_missing_room", {
+          id: displayed.attrs.id,
+          fromDeviceId,
+        });
       }
       return;
     }
 
     if (attrs.type === "error") {
       const errorEvent = parseStanzaError(stanza);
+      this.log("warn", "chat_message_error_stanza_received", {
+        id: attrs.id,
+        roomId,
+        condition: errorEvent.condition,
+        text: errorEvent.text,
+      });
       this.emit(this.errorListeners, {
         ...errorEvent,
         id: attrs.id,
@@ -1255,20 +1371,41 @@ class LulaChatClient implements ChatClient {
         isTyping: Boolean(composing),
         raw: stanza,
       });
+      this.log("debug", "chat_typing_received", {
+        roomId,
+        fromDeviceId,
+        isTyping: Boolean(composing),
+      });
     }
 
     const decoded = await this.decodePayload(stanza);
     const body = decoded.body;
     const attachments = normalizeAttachmentPayload(decoded.attachments);
-    if (!body.trim() && !attachments?.length) return;
-    if (!roomId || !toDeviceId) return;
+    if (!body.trim() && !attachments?.length) {
+      this.log("debug", "chat_message_ignored_empty", {
+        id: attrs.id,
+        fromDeviceId,
+        roomId,
+      });
+      return;
+    }
+    if (!roomId || !toDeviceId) {
+      this.log("debug", "chat_message_ignored_missing_target_context", {
+        id: attrs.id,
+        fromDeviceId,
+        roomId,
+        hasToDeviceId: Boolean(toDeviceId),
+      });
+      return;
+    }
     const metadata = normalizeMessageMetadata(
       decoded.metadata,
       inferMessageType(decoded.metadata, body),
     );
+    const emittedMessageId = attrs.id || generateMessageId();
 
     this.emit(this.messageListeners, {
-      id: attrs.id || generateMessageId(),
+      id: emittedMessageId,
       fromUserId,
       fromDeviceId,
       toDeviceId,
@@ -1278,6 +1415,13 @@ class LulaChatClient implements ChatClient {
       metadata,
       ...(attachments?.length ? { attachments } : {}),
       raw: stanza,
+    });
+    this.log("debug", "chat_message_received", {
+      id: emittedMessageId,
+      roomId,
+      fromDeviceId,
+      messageType: metadata.messageType,
+      hasAttachments: Boolean(attachments?.length),
     });
 
     const receiptRequest = stanza.getChild?.("request", XMPP_RECEIPTS_NS);
@@ -1341,8 +1485,16 @@ class LulaChatClient implements ChatClient {
     if (!normalizedRoomId || !normalizedPeerDeviceId) return;
     if (normalizedPeerDeviceId === this.getBareDeviceId()) return;
     const peers = this.roomPeers.get(normalizedRoomId) ?? new Set<string>();
+    const previousSize = peers.size;
     peers.add(normalizedPeerDeviceId);
     this.roomPeers.set(normalizedRoomId, peers);
+    if (peers.size !== previousSize) {
+      this.log("debug", "chat_room_peer_remembered", {
+        roomId: normalizedRoomId,
+        peerDeviceId: normalizedPeerDeviceId,
+        peerCount: peers.size,
+      });
+    }
   }
 
   private rememberRoomPeers(roomId?: string, peerDeviceIds?: string[]): void {
@@ -1379,6 +1531,13 @@ class LulaChatClient implements ChatClient {
     ]).filter(
       (deviceId) => deviceId !== this.getBareDeviceId(),
     );
+    this.log("debug", "chat_room_targets_resolved", {
+      roomId: input.roomId,
+      explicitCount: explicit.length,
+      resolverCount: resolverDeviceIds.length,
+      cachedCount: cachedDeviceIds.length,
+      targetCount: targets.length,
+    });
     if (!targets.length) {
       const suffix = input.roomId ? `:${input.roomId}` : "";
       throw new Error(`chat_room_peer_unknown${suffix}`);
@@ -1395,12 +1554,23 @@ class LulaChatClient implements ChatClient {
     if (!normalizedRoomId) return [];
     if (this.config.roomDirectory?.getPeerDeviceIds) {
       const resolved = await this.config.roomDirectory.getPeerDeviceIds(normalizedRoomId);
-      return normalizeDeviceIdList(resolved);
+      const normalized = normalizeDeviceIdList(resolved);
+      this.log("debug", "chat_room_directory_peer_devices_resolved", {
+        roomId: normalizedRoomId,
+        deviceCount: normalized.length,
+      });
+      return normalized;
     }
     if (this.config.resolveRoomDeviceIds) {
       const resolved = await this.config.resolveRoomDeviceIds(normalizedRoomId);
-      return normalizeDeviceIdList(resolved);
+      const normalized = normalizeDeviceIdList(resolved);
+      this.log("debug", "chat_room_fallback_peer_devices_resolved", {
+        roomId: normalizedRoomId,
+        deviceCount: normalized.length,
+      });
+      return normalized;
     }
+    this.log("debug", "chat_room_peer_devices_unresolved", { roomId: normalizedRoomId });
     return [];
   }
 
@@ -1417,6 +1587,7 @@ class LulaChatClient implements ChatClient {
           await send(targetDeviceId);
           return { ok: true as const };
         } catch (error) {
+          this.log("warn", "chat_target_send_failed", { targetDeviceId, error });
           return { ok: false as const, error };
         }
       }),
@@ -1447,14 +1618,28 @@ class LulaChatClient implements ChatClient {
     input: ChatEncryptInput,
   ): Promise<Required<ChatEncodedPayload>> {
     const encrypted = await this.config.encryption?.encrypt?.(input, this.getEncryptionContext());
-    if (Array.isArray(encrypted)) return { body: input.body, children: encrypted };
+    if (Array.isArray(encrypted)) {
+      this.log("debug", "chat_payload_encoded_encrypted_array", {
+        messageType: input.metadata.messageType,
+        childCount: encrypted.length,
+      });
+      return { body: input.body, children: encrypted };
+    }
     if (encrypted) {
+      this.log("debug", "chat_payload_encoded_encrypted", {
+        messageType: input.metadata.messageType,
+        childCount: encrypted.children?.length ?? 0,
+      });
       return {
         body: encrypted.body ?? input.body,
         children: encrypted.children ?? [],
       };
     }
 
+    this.log("debug", "chat_payload_encoded_plain", {
+      messageType: input.metadata.messageType,
+      hasAttachments: Boolean(input.attachments?.length),
+    });
     return {
       body: input.body,
       children: [
@@ -1477,7 +1662,13 @@ class LulaChatClient implements ChatClient {
       { stanza },
       this.getEncryptionContext(),
     );
-    if (decrypted) return decrypted;
+    if (decrypted) {
+      this.log("debug", "chat_payload_decoded_encrypted", {
+        hasBody: Boolean(decrypted.body?.trim()),
+        hasAttachments: Boolean(decrypted.attachments?.length),
+      });
+      return decrypted;
+    }
 
     const body = stanza.getChildText?.("body") ?? "";
     const encodedMetadata = stanza.getChild?.("lula", XMPP_CHAT_NS)?.getText?.();
@@ -1494,11 +1685,21 @@ class LulaChatClient implements ChatClient {
         ? normalizeAttachmentPayload((metadataPayload as Record<string, unknown>).attachments)
         : undefined;
 
+    this.log("debug", "chat_payload_decoded_plain", {
+      hasBody: Boolean(body.trim()),
+      hasMetadata: Boolean(metadata),
+      hasAttachments: Boolean(attachments?.length),
+    });
     return { body, metadata, attachments };
   }
 
   private setStatus(status: ChatStatus, error?: unknown): void {
     this.status = status;
+    this.log(status === "error" ? "error" : "debug", "chat_status_changed", {
+      status,
+      deviceId: this.onlineDeviceId,
+      ...(error ? { error } : {}),
+    });
     this.emit(this.statusListeners, {
       status,
       deviceId: this.onlineDeviceId,
@@ -1589,9 +1790,20 @@ class LulaChatClient implements ChatClient {
       try {
         listener(event);
       } catch (error) {
-        this.config.logger?.error?.("chat_listener_error", { error });
+        this.log("error", "chat_listener_error", { error });
       }
     }
+  }
+
+  private log(
+    level: Exclude<ChatLogLevel, "silent">,
+    message: string,
+    data?: Record<string, unknown>,
+  ): void {
+    const logger = this.config.logger;
+    if (!logger) return;
+    if (CHAT_LOG_LEVEL_WEIGHT[this.config.logLevel] < CHAT_LOG_LEVEL_WEIGHT[level]) return;
+    logger[level]?.(message, data);
   }
 }
 
@@ -2001,6 +2213,7 @@ type NormalizedConfig = {
   roomDirectory?: ChatRoomDirectory;
   resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
   logger?: ChatLogger;
+  logLevel: ChatLogLevel;
   encryption?: ChatEncryption;
   attachmentService?: ChatAttachmentService;
 };
@@ -2038,6 +2251,7 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
     roomDirectory: config.roomDirectory,
     resolveRoomDeviceIds: config.resolveRoomDeviceIds,
     logger: config.logger,
+    logLevel: normalizeLogLevel(config.logLevel, config.logger),
     encryption: config.encryption,
     attachmentService: config.attachmentService,
   };
@@ -2664,6 +2878,13 @@ function normalizeResource(value?: ChatResource): ChatResource | undefined {
   if (!resource) return undefined;
   if ((chatResources as readonly string[]).includes(resource)) return resource as ChatResource;
   throw new Error(`chat_resource_invalid:${resource}`);
+}
+
+function normalizeLogLevel(level: ChatLogLevel | undefined, logger?: ChatLogger): ChatLogLevel {
+  if (!logger) return "silent";
+  if (!level) return "error";
+  if (level in CHAT_LOG_LEVEL_WEIGHT) return level;
+  throw new Error(`chat_log_level_invalid:${level}`);
 }
 
 function addressToString(address: unknown): string | undefined {

@@ -8,6 +8,7 @@ export type ChatMessageMetadata = Record<string, unknown> & {
 };
 export declare const chatResources: readonly ["server-client", "ios-primary-client", "android-primary-client", "ios-secondary-client", "android-secondary-client"];
 export type ChatResource = (typeof chatResources)[number];
+export type ChatLogLevel = "silent" | "error" | "warn" | "info" | "debug";
 export type ChatLogger = {
     debug?: (message: string, data?: Record<string, unknown>) => void;
     info?: (message: string, data?: Record<string, unknown>) => void;
@@ -135,6 +136,8 @@ export type ChatClientBaseConfig = {
     resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
     /** Optional logger for connection, encryption, and stanza errors. */
     logger?: ChatLogger;
+    /** Logger verbosity. Defaults to "error" when a logger is provided. */
+    logLevel?: ChatLogLevel;
     /** Message encryption adapter. Pass createOmemoEncryption(...) for built-in OMEMO. */
     encryption: ChatEncryption;
     /** Attachment upload and resolve adapter for file and image messages. */
