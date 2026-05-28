@@ -174,7 +174,7 @@ export type ChatMessage = {
     raw?: unknown;
 };
 export type ChatMessageContext = {
-    providerChatRoomId?: string;
+    providerDirectMessageRoomId?: string;
     submissionId?: string;
     senderName?: string;
     displayName?: string;
@@ -199,14 +199,14 @@ export type ChatTextMessageInput = Omit<ChatMessageInput, "metadata"> & {
 };
 export type ChatTextMessage = ChatMessage & {
     context?: ChatMessageContext;
-    providerChatRoomId?: string;
+    providerDirectMessageRoomId?: string;
     submissionId?: string;
     displayName?: string;
 };
 export type ChatAttachmentMessage = ChatMessage & {
     attachments: ChatAttachment[];
     context?: ChatMessageContext;
-    providerChatRoomId?: string;
+    providerDirectMessageRoomId?: string;
     submissionId?: string;
     displayName?: string;
 };
@@ -223,7 +223,7 @@ export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"
     providerUserId?: string;
     recordId?: string;
     formVersion?: number;
-    providerChatRoomId?: string;
+    providerDirectMessageRoomId?: string;
     submittedAt?: string;
     pretty?: boolean;
 };
@@ -231,7 +231,7 @@ export type ChatFormSubmissionMessage = ChatMessage & {
     answers: Record<string, string>;
     fields: ChatFormSubmissionField[];
     payload: Record<string, unknown>;
-    providerChatRoomId?: string;
+    providerDirectMessageRoomId?: string;
     formId?: string;
     providerUserId?: string;
     recordId?: string;
@@ -426,7 +426,7 @@ export declare function createDeviceId(options?: CreateDeviceIdOptions): DeviceI
 export declare function getChatAddress(input: ChatAddressInput): ChatAddress;
 export declare function createRoomDirectory(options: ChatRoomDirectoryOptions): ChatRoomDirectory;
 export declare function createOmemoEncryption(options?: OmemoEncryptionOptions): ChatEncryption;
-export declare function extractProviderChatRoomId(metadata?: Record<string, unknown>): string | undefined;
+export declare function extractProviderDirectMessageRoomId(metadata?: Record<string, unknown>): string | undefined;
 export declare function extractSubmissionId(metadata?: Record<string, unknown>): string | undefined;
 export declare function extractDisplayName(metadata?: Record<string, unknown>): string | undefined;
 export declare function buildChatMessageMetadata(input: {
@@ -435,7 +435,7 @@ export declare function buildChatMessageMetadata(input: {
     context?: ChatMessageContext;
     displayName?: string;
 }): ChatMessageMetadata;
-export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerChatRoomId" | "submittedAt"> & {
+export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerDirectMessageRoomId" | "submittedAt"> & {
     displayName?: string;
 }): ChatMessageMetadata;
 export declare function createMemoryStorageBackend(): ChatKeyValueStore;

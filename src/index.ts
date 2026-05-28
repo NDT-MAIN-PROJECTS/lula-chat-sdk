@@ -259,7 +259,7 @@ export type ChatMessage = {
 };
 
 export type ChatMessageContext = {
-  providerChatRoomId?: string;
+  providerDirectMessageRoomId?: string;
   submissionId?: string;
   senderName?: string;
   displayName?: string;
@@ -287,7 +287,7 @@ export type ChatTextMessageInput = Omit<ChatMessageInput, "metadata"> & {
 
 export type ChatTextMessage = ChatMessage & {
   context?: ChatMessageContext;
-  providerChatRoomId?: string;
+  providerDirectMessageRoomId?: string;
   submissionId?: string;
   displayName?: string;
 };
@@ -295,7 +295,7 @@ export type ChatTextMessage = ChatMessage & {
 export type ChatAttachmentMessage = ChatMessage & {
   attachments: ChatAttachment[];
   context?: ChatMessageContext;
-  providerChatRoomId?: string;
+  providerDirectMessageRoomId?: string;
   submissionId?: string;
   displayName?: string;
 };
@@ -314,7 +314,7 @@ export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"
   providerUserId?: string;
   recordId?: string;
   formVersion?: number;
-  providerChatRoomId?: string;
+  providerDirectMessageRoomId?: string;
   submittedAt?: string;
   pretty?: boolean;
 };
@@ -323,7 +323,7 @@ export type ChatFormSubmissionMessage = ChatMessage & {
   answers: Record<string, string>;
   fields: ChatFormSubmissionField[];
   payload: Record<string, unknown>;
-  providerChatRoomId?: string;
+  providerDirectMessageRoomId?: string;
   formId?: string;
   providerUserId?: string;
   recordId?: string;
@@ -810,11 +810,11 @@ class LulaChatClient implements ChatClient {
       ...input,
       displayName: this.config.displayName,
     });
-    const providerChatRoomId = extractProviderChatRoomId(metadata);
+    const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
     return this.sendMessage({
       ...input,
       metadata,
-      targetRoomId: input.targetRoomId ?? providerChatRoomId ?? input.roomId,
+      targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId,
     });
   }
 
@@ -823,12 +823,12 @@ class LulaChatClient implements ChatClient {
       ...input,
       displayName: this.config.displayName,
     });
-    const providerChatRoomId = extractProviderChatRoomId(metadata);
+    const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
     return this.sendMessage({
       ...pickMessageTargetInput(input),
       body: JSON.stringify(input.payload, null, input.pretty ? 2 : undefined),
       metadata,
-      targetRoomId: input.targetRoomId ?? providerChatRoomId ?? input.roomId,
+      targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId,
     });
   }
 
@@ -877,14 +877,14 @@ class LulaChatClient implements ChatClient {
       },
       displayName: this.config.displayName,
     });
-    const providerChatRoomId = extractProviderChatRoomId(metadata);
+    const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
     return this.sendMessage({
       ...input,
       roomId,
       body: input.body ?? "",
       attachments: [uploaded],
       metadata,
-      targetRoomId: input.targetRoomId ?? providerChatRoomId ?? roomId,
+      targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? roomId,
     });
   }
 
@@ -2267,7 +2267,7 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
   };
 }
 
-export function extractProviderChatRoomId(metadata?: Record<string, unknown>): string | undefined {
+export function extractProviderDirectMessageRoomId(metadata?: Record<string, unknown>): string | undefined {
   if (!metadata) return undefined;
 
   const lulaPayload = isRecord(metadata.lulaPayload)
@@ -2278,9 +2278,9 @@ export function extractProviderChatRoomId(metadata?: Record<string, unknown>): s
     : undefined;
 
   return firstString(
-    metadata.providerChatRoomId,
-    lulaPayload?.providerChatRoomId,
-    lulaSubmission?.providerChatRoomId,
+    metadata.providerDirectMessageRoomId,
+    lulaPayload?.providerDirectMessageRoomId,
+    lulaSubmission?.providerDirectMessageRoomId,
   );
 }
 
@@ -2343,14 +2343,14 @@ export function buildChatMessageMetadata(input: {
   displayName?: string;
 }): ChatMessageMetadata {
   const metadata = normalizeMessageMetadata(input.metadata, "CHAT_MESSAGE");
-  const providerChatRoomId = firstString(
-    input.context?.providerChatRoomId,
-    extractProviderChatRoomId(metadata),
+  const providerDirectMessageRoomId = firstString(
+    input.context?.providerDirectMessageRoomId,
+    extractProviderDirectMessageRoomId(metadata),
     input.roomId,
   );
 
-  if (providerChatRoomId) {
-    metadata.providerChatRoomId = providerChatRoomId;
+  if (providerDirectMessageRoomId) {
+    metadata.providerDirectMessageRoomId = providerDirectMessageRoomId;
   }
   if (typeof metadata.sentAtMs !== "number") {
     metadata.sentAtMs = Date.now();
@@ -2377,12 +2377,12 @@ export function buildChatMessageMetadata(input: {
     const existing = isRecord(metadata.lulaSubmission)
       ? (metadata.lulaSubmission as Record<string, unknown>)
       : {};
-    const { providerChatRoomId: _providerChatRoomId, ...rest } = context;
+    const { providerDirectMessageRoomId: _providerDirectMessageRoomId, ...rest } = context;
     metadata.lulaSubmission = removeUndefinedValues({
       ...existing,
       ...rest,
       ...(displayName ? { displayName } : {}),
-      ...(providerChatRoomId ? { providerChatRoomId } : {}),
+      ...(providerDirectMessageRoomId ? { providerDirectMessageRoomId } : {}),
     });
   }
 
@@ -2398,21 +2398,21 @@ export function buildFormSubmissionMetadata(
     | "providerUserId"
     | "recordId"
     | "formVersion"
-    | "providerChatRoomId"
+    | "providerDirectMessageRoomId"
     | "submittedAt"
   > & { displayName?: string },
 ): ChatMessageMetadata {
   const metadata = normalizeMessageMetadata(input.metadata, "FORM_SUBMISSION");
-  const providerChatRoomId = firstString(
-    input.providerChatRoomId,
-    extractProviderChatRoomId(metadata),
+  const providerDirectMessageRoomId = firstString(
+    input.providerDirectMessageRoomId,
+    extractProviderDirectMessageRoomId(metadata),
   );
   const existingPayload = isRecord(metadata.lulaPayload)
     ? (metadata.lulaPayload as Record<string, unknown>)
     : {};
 
-  if (providerChatRoomId) {
-    metadata.providerChatRoomId = providerChatRoomId;
+  if (providerDirectMessageRoomId) {
+    metadata.providerDirectMessageRoomId = providerDirectMessageRoomId;
   }
   if (typeof metadata.sentAtMs !== "number") {
     metadata.sentAtMs = Date.now();
@@ -2429,7 +2429,7 @@ export function buildFormSubmissionMetadata(
     providerUserId: input.providerUserId,
     recordId: input.recordId,
     formVersion: input.formVersion,
-    providerChatRoomId,
+    providerDirectMessageRoomId,
     submittedAt:
       input.submittedAt ??
       (typeof existingPayload.submittedAt === "string"
@@ -2477,7 +2477,7 @@ function pickMessageTargetInput(input: ChatFormSubmissionInput): Omit<ChatMessag
 
 function toChatTextMessage(message: ChatMessage): ChatTextMessage {
   const metadata = message.metadata;
-  const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
+  const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata) ?? message.roomId;
   const submissionId = extractSubmissionId(metadata);
   const displayName = extractDisplayName(metadata);
   const lulaSubmission = isRecord(metadata?.lulaSubmission)
@@ -2485,7 +2485,7 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
     : undefined;
   const context = removeUndefinedValues({
     ...(lulaSubmission ?? {}),
-    ...(providerChatRoomId ? { providerChatRoomId } : {}),
+    ...(providerDirectMessageRoomId ? { providerDirectMessageRoomId } : {}),
     ...(submissionId ? { submissionId } : {}),
     ...(displayName ? { displayName } : {}),
   }) as ChatMessageContext;
@@ -2493,7 +2493,7 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
   return {
     ...message,
     metadata: normalizeMessageMetadata(message.metadata, "CHAT_MESSAGE"),
-    providerChatRoomId,
+    providerDirectMessageRoomId,
     submissionId,
     ...(displayName ? { displayName } : {}),
     ...(Object.keys(context).length > 0 ? { context } : {}),
@@ -2507,7 +2507,7 @@ function toChatAttachmentMessage(message: ChatMessage): ChatAttachmentMessage {
   }
 
   const metadata = message.metadata;
-  const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
+  const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata) ?? message.roomId;
   const submissionId = extractSubmissionId(metadata);
   const displayName = extractDisplayName(metadata);
   const lulaSubmission = isRecord(metadata?.lulaSubmission)
@@ -2515,7 +2515,7 @@ function toChatAttachmentMessage(message: ChatMessage): ChatAttachmentMessage {
     : undefined;
   const context = removeUndefinedValues({
     ...(lulaSubmission ?? {}),
-    ...(providerChatRoomId ? { providerChatRoomId } : {}),
+    ...(providerDirectMessageRoomId ? { providerDirectMessageRoomId } : {}),
     ...(submissionId ? { submissionId } : {}),
     ...(displayName ? { displayName } : {}),
   }) as ChatMessageContext;
@@ -2524,7 +2524,7 @@ function toChatAttachmentMessage(message: ChatMessage): ChatAttachmentMessage {
     ...message,
     attachments,
     metadata: normalizeMessageMetadata(message.metadata, "CHAT_MESSAGE"),
-    providerChatRoomId,
+    providerDirectMessageRoomId,
     submissionId,
     ...(displayName ? { displayName } : {}),
     ...(Object.keys(context).length > 0 ? { context } : {}),
@@ -2565,7 +2565,7 @@ function parseFormSubmissionMessage(message: ChatMessage): ChatFormSubmissionMes
     return null;
   }
 
-  const providerChatRoomId = extractProviderChatRoomId(metadata) ?? message.roomId;
+  const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata) ?? message.roomId;
   const normalizedFormPayload = normalizeFormSubmissionPayload(payload);
   return {
     ...message,
@@ -2573,7 +2573,7 @@ function parseFormSubmissionMessage(message: ChatMessage): ChatFormSubmissionMes
     answers: normalizedFormPayload.answers,
     fields: normalizedFormPayload.fields,
     payload,
-    providerChatRoomId,
+    providerDirectMessageRoomId: providerDirectMessageRoomId,
     formId: firstString(lulaPayload?.formId, payload.formId),
     providerUserId: firstString(lulaPayload?.providerUserId, payload.providerUserId),
     recordId: firstString(lulaPayload?.recordId, payload.recordId),
@@ -2925,7 +2925,7 @@ function normalizeChatRoomResponse(
   const roomRecord = unwrapRoomRecord(response);
   const roomId = firstString(
     roomRecord.roomId,
-    roomRecord.providerChatRoomId,
+    roomRecord.providerDirectMessageRoomId,
     roomRecord.id,
     roomRecord._id,
   );

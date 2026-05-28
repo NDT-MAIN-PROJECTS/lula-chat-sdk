@@ -210,7 +210,7 @@ await chatClient.sendFormSubmission({
   },
   formId,
   providerUserId,
-  providerChatRoomId,
+  providerDirectMessageRoomId,
 });
 ```
 
