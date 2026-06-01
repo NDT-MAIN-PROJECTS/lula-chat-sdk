@@ -43,6 +43,7 @@ __export(index_exports, {
   extractDisplayName: () => extractDisplayName,
   extractProviderDirectMessageRoomId: () => extractProviderDirectMessageRoomId,
   extractSubmissionId: () => extractSubmissionId,
+  extractSubmissionRoomId: () => extractSubmissionRoomId,
   getChatAddress: () => getChatAddress,
   init: () => init,
   storageBackends: () => storageBackends
@@ -1459,8 +1460,23 @@ function extractProviderDirectMessageRoomId(metadata) {
 }
 function extractSubmissionId(metadata) {
   if (!metadata) return void 0;
+  const lulaPayload = isRecord(metadata.lulaPayload) ? metadata.lulaPayload : void 0;
   const lulaSubmission = isRecord(metadata.lulaSubmission) ? metadata.lulaSubmission : void 0;
-  return firstString(metadata.submissionId, lulaSubmission?.submissionId);
+  return firstString(
+    metadata.submissionId,
+    lulaPayload?.submissionId,
+    lulaSubmission?.submissionId
+  );
+}
+function extractSubmissionRoomId(metadata) {
+  if (!metadata) return void 0;
+  const lulaPayload = isRecord(metadata.lulaPayload) ? metadata.lulaPayload : void 0;
+  const lulaSubmission = isRecord(metadata.lulaSubmission) ? metadata.lulaSubmission : void 0;
+  return firstString(
+    metadata.submissionRoomId,
+    lulaPayload?.submissionRoomId,
+    lulaSubmission?.submissionRoomId
+  );
 }
 function extractDisplayName(metadata) {
   if (!metadata) return void 0;
@@ -1502,6 +1518,20 @@ function buildChatMessageMetadata(input) {
   if (providerDirectMessageRoomId) {
     metadata.providerDirectMessageRoomId = providerDirectMessageRoomId;
   }
+  const submissionRoomId = firstString(
+    input.context?.submissionRoomId,
+    extractSubmissionRoomId(metadata)
+  );
+  if (submissionRoomId) {
+    metadata.submissionRoomId = submissionRoomId;
+  }
+  const submissionId = firstString(
+    input.context?.submissionId,
+    extractSubmissionId(metadata)
+  );
+  if (submissionId) {
+    metadata.submissionId = submissionId;
+  }
   if (typeof metadata.sentAtMs !== "number") {
     metadata.sentAtMs = Date.now();
   }
@@ -1515,13 +1545,15 @@ function buildChatMessageMetadata(input) {
   if (displayName) {
     metadata.displayName = displayName;
   }
-  const shouldWriteSubmissionContext = context && (typeof context.submissionId === "string" || typeof context.senderName === "string" || typeof context.displayName === "string");
+  const shouldWriteSubmissionContext = context && (typeof context.submissionRoomId === "string" || typeof context.submissionId === "string" || typeof context.senderName === "string" || typeof context.displayName === "string");
   if (shouldWriteSubmissionContext) {
     const existing = isRecord(metadata.lulaSubmission) ? metadata.lulaSubmission : {};
     const { providerDirectMessageRoomId: _providerDirectMessageRoomId, ...rest } = context;
     metadata.lulaSubmission = removeUndefinedValues({
       ...existing,
       ...rest,
+      ...submissionRoomId ? { submissionRoomId } : {},
+      ...submissionId ? { submissionId } : {},
       ...displayName ? { displayName } : {},
       ...providerDirectMessageRoomId ? { providerDirectMessageRoomId } : {}
     });
@@ -1534,9 +1566,24 @@ function buildFormSubmissionMetadata(input) {
     input.providerDirectMessageRoomId,
     extractProviderDirectMessageRoomId(metadata)
   );
+  const submissionRoomId = firstString(
+    input.submissionRoomId,
+    extractSubmissionRoomId(metadata),
+    input.roomId
+  );
+  const submissionId = firstString(
+    input.submissionId,
+    extractSubmissionId(metadata)
+  );
   const existingPayload = isRecord(metadata.lulaPayload) ? metadata.lulaPayload : {};
   if (providerDirectMessageRoomId) {
     metadata.providerDirectMessageRoomId = providerDirectMessageRoomId;
+  }
+  if (submissionRoomId) {
+    metadata.submissionRoomId = submissionRoomId;
+  }
+  if (submissionId) {
+    metadata.submissionId = submissionId;
   }
   if (typeof metadata.sentAtMs !== "number") {
     metadata.sentAtMs = Date.now();
@@ -1547,7 +1594,8 @@ function buildFormSubmissionMetadata(input) {
   }
   metadata.lulaPayload = removeUndefinedValues({
     ...existingPayload,
-    submissionRoomId: input.roomId,
+    submissionRoomId,
+    submissionId,
     formId: input.formId,
     providerUserId: input.providerUserId,
     recordId: input.recordId,
@@ -1585,12 +1633,14 @@ function pickMessageTargetInput(input) {
 function toChatTextMessage(message) {
   const metadata = message.metadata;
   const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata) ?? message.roomId;
+  const submissionRoomId = extractSubmissionRoomId(metadata);
   const submissionId = extractSubmissionId(metadata);
-  const displayName = extractDisplayName(metadata);
+  const displayName = extractDisplayName(metadata) ?? message.fromUserId;
   const lulaSubmission = isRecord(metadata?.lulaSubmission) ? metadata?.lulaSubmission : void 0;
   const context = removeUndefinedValues({
     ...lulaSubmission ?? {},
     ...providerDirectMessageRoomId ? { providerDirectMessageRoomId } : {},
+    ...submissionRoomId ? { submissionRoomId } : {},
     ...submissionId ? { submissionId } : {},
     ...displayName ? { displayName } : {}
   });
@@ -1598,8 +1648,9 @@ function toChatTextMessage(message) {
     ...message,
     metadata: normalizeMessageMetadata(message.metadata, "CHAT_MESSAGE"),
     providerDirectMessageRoomId,
+    ...submissionRoomId ? { submissionRoomId } : {},
     submissionId,
-    ...displayName ? { displayName } : {},
+    displayName,
     ...Object.keys(context).length > 0 ? { context } : {}
   };
 }
@@ -1610,12 +1661,14 @@ function toChatAttachmentMessage(message) {
   }
   const metadata = message.metadata;
   const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata) ?? message.roomId;
+  const submissionRoomId = extractSubmissionRoomId(metadata);
   const submissionId = extractSubmissionId(metadata);
   const displayName = extractDisplayName(metadata);
   const lulaSubmission = isRecord(metadata?.lulaSubmission) ? metadata?.lulaSubmission : void 0;
   const context = removeUndefinedValues({
     ...lulaSubmission ?? {},
     ...providerDirectMessageRoomId ? { providerDirectMessageRoomId } : {},
+    ...submissionRoomId ? { submissionRoomId } : {},
     ...submissionId ? { submissionId } : {},
     ...displayName ? { displayName } : {}
   });
@@ -1624,6 +1677,7 @@ function toChatAttachmentMessage(message) {
     attachments,
     metadata: normalizeMessageMetadata(message.metadata, "CHAT_MESSAGE"),
     providerDirectMessageRoomId,
+    ...submissionRoomId ? { submissionRoomId } : {},
     submissionId,
     ...displayName ? { displayName } : {},
     ...Object.keys(context).length > 0 ? { context } : {}
@@ -1653,6 +1707,9 @@ function parseFormSubmissionMessage(message) {
     return null;
   }
   const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata) ?? message.roomId;
+  const submissionRoomId = extractSubmissionRoomId(metadata);
+  const submissionId = extractSubmissionId(metadata);
+  const displayName = extractDisplayName(metadata);
   const normalizedFormPayload = normalizeFormSubmissionPayload(payload);
   return {
     ...message,
@@ -1661,11 +1718,14 @@ function parseFormSubmissionMessage(message) {
     fields: normalizedFormPayload.fields,
     payload,
     providerDirectMessageRoomId,
+    ...submissionRoomId ? { submissionRoomId } : {},
+    ...submissionId ? { submissionId } : {},
     formId: firstString(lulaPayload?.formId, payload.formId),
     providerUserId: firstString(lulaPayload?.providerUserId, payload.providerUserId),
     recordId: firstString(lulaPayload?.recordId, payload.recordId),
     formVersion: typeof lulaPayload?.formVersion === "number" ? lulaPayload.formVersion : typeof payload.formVersion === "number" ? payload.formVersion : void 0,
-    submittedAt: firstString(lulaPayload?.submittedAt, payload.submittedAt)
+    submittedAt: firstString(lulaPayload?.submittedAt, payload.submittedAt),
+    ...displayName ? { displayName } : {}
   };
 }
 function normalizeFormSubmissionPayload(payload) {
@@ -2291,6 +2351,7 @@ function decodeJsonBase64(value) {
   extractDisplayName,
   extractProviderDirectMessageRoomId,
   extractSubmissionId,
+  extractSubmissionRoomId,
   getChatAddress,
   init,
   storageBackends

@@ -175,6 +175,7 @@ export type ChatMessage = {
 };
 export type ChatMessageContext = {
     providerDirectMessageRoomId?: string;
+    submissionRoomId?: string;
     submissionId?: string;
     senderName?: string;
     displayName?: string;
@@ -189,24 +190,30 @@ export type ChatMessageInput = {
     attachments?: ChatAttachment[];
     roomId?: string;
     targetRoomId?: string;
+    /** Any additional metadata for the text message. */
     metadata?: Record<string, unknown>;
     id?: string;
     requestReceipt?: boolean;
 };
 export type ChatTextMessageInput = Omit<ChatMessageInput, "metadata"> & {
+    /** Any additional metadata for the text message. */
     metadata?: Record<string, unknown>;
     context?: ChatMessageContext;
 };
 export type ChatTextMessage = ChatMessage & {
     context?: ChatMessageContext;
-    providerDirectMessageRoomId?: string;
+    providerDirectMessageRoomId: string;
+    submissionRoomId?: string;
     submissionId?: string;
-    displayName?: string;
+    displayName: string;
 };
 export type ChatAttachmentMessage = ChatMessage & {
     attachments: ChatAttachment[];
     context?: ChatMessageContext;
     providerDirectMessageRoomId?: string;
+    /** The room ID where the submission was made. */
+    submissionRoomId?: string;
+    /** The ID of the submission. */
     submissionId?: string;
     displayName?: string;
 };
@@ -223,7 +230,9 @@ export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"
     providerUserId?: string;
     recordId?: string;
     formVersion?: number;
-    providerDirectMessageRoomId?: string;
+    providerDirectMessageRoomId: string;
+    submissionRoomId: string;
+    submissionId: string;
     submittedAt?: string;
     pretty?: boolean;
 };
@@ -232,11 +241,14 @@ export type ChatFormSubmissionMessage = ChatMessage & {
     fields: ChatFormSubmissionField[];
     payload: Record<string, unknown>;
     providerDirectMessageRoomId?: string;
+    submissionRoomId?: string;
+    submissionId?: string;
     formId?: string;
     providerUserId?: string;
     recordId?: string;
     formVersion?: number;
     submittedAt?: string;
+    displayName?: string;
 };
 export type ChatAttachmentMessageInput = Omit<ChatTextMessageInput, "body" | "attachments"> & {
     attachment: ChatAttachmentUpload;
@@ -428,6 +440,7 @@ export declare function createRoomDirectory(options: ChatRoomDirectoryOptions): 
 export declare function createOmemoEncryption(options?: OmemoEncryptionOptions): ChatEncryption;
 export declare function extractProviderDirectMessageRoomId(metadata?: Record<string, unknown>): string | undefined;
 export declare function extractSubmissionId(metadata?: Record<string, unknown>): string | undefined;
+export declare function extractSubmissionRoomId(metadata?: Record<string, unknown>): string | undefined;
 export declare function extractDisplayName(metadata?: Record<string, unknown>): string | undefined;
 export declare function buildChatMessageMetadata(input: {
     roomId?: string;
@@ -435,7 +448,7 @@ export declare function buildChatMessageMetadata(input: {
     context?: ChatMessageContext;
     displayName?: string;
 }): ChatMessageMetadata;
-export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerDirectMessageRoomId" | "submittedAt"> & {
+export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerDirectMessageRoomId" | "submissionRoomId" | "submissionId" | "submittedAt"> & {
     displayName?: string;
 }): ChatMessageMetadata;
 export declare function createMemoryStorageBackend(): ChatKeyValueStore;
