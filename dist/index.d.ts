@@ -176,7 +176,7 @@ export type ChatMessage = {
 export type ChatMessageContext = {
     providerDirectMessageRoomId?: string;
     submissionRoomId?: string;
-    submissionId?: string;
+    correlationId?: string;
     senderName?: string;
     displayName?: string;
     [key: string]: unknown;
@@ -204,7 +204,7 @@ export type ChatTextMessage = ChatMessage & {
     context?: ChatMessageContext;
     providerDirectMessageRoomId: string;
     submissionRoomId?: string;
-    submissionId?: string;
+    correlationId?: string;
     displayName: string;
 };
 export type ChatAttachmentMessage = ChatMessage & {
@@ -214,7 +214,7 @@ export type ChatAttachmentMessage = ChatMessage & {
     /** The room ID where the submission was made. */
     submissionRoomId?: string;
     /** The ID of the submission. */
-    submissionId?: string;
+    correlationId?: string;
     displayName?: string;
 };
 export type ChatFormSubmissionField = {
@@ -232,7 +232,7 @@ export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"
     formVersion?: number;
     providerDirectMessageRoomId: string;
     submissionRoomId: string;
-    submissionId: string;
+    correlationId: string;
     submittedAt?: string;
     pretty?: boolean;
 };
@@ -242,7 +242,7 @@ export type ChatFormSubmissionMessage = ChatMessage & {
     payload: Record<string, unknown>;
     providerDirectMessageRoomId?: string;
     submissionRoomId?: string;
-    submissionId?: string;
+    correlationId?: string;
     formId?: string;
     providerUserId?: string;
     recordId?: string;
@@ -448,7 +448,7 @@ export declare function buildChatMessageMetadata(input: {
     context?: ChatMessageContext;
     displayName?: string;
 }): ChatMessageMetadata;
-export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerDirectMessageRoomId" | "submissionRoomId" | "submissionId" | "submittedAt"> & {
+export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerDirectMessageRoomId" | "submissionRoomId" | "correlationId" | "submittedAt"> & {
     displayName?: string;
 }): ChatMessageMetadata;
 export declare function createMemoryStorageBackend(): ChatKeyValueStore;

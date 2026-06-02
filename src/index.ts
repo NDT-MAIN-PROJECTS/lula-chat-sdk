@@ -261,7 +261,7 @@ export type ChatMessage = {
 export type ChatMessageContext = {
   providerDirectMessageRoomId?: string;
   submissionRoomId?: string;
-  submissionId?: string;
+  correlationId?: string;
   senderName?: string;
   displayName?: string;
   [key: string]: unknown;
@@ -292,7 +292,7 @@ export type ChatTextMessage = ChatMessage & {
   context?: ChatMessageContext;
   providerDirectMessageRoomId: string;
   submissionRoomId?: string;
-  submissionId?: string;
+  correlationId?: string;
   displayName: string;
 };
 
@@ -304,7 +304,7 @@ export type ChatAttachmentMessage = ChatMessage & {
   /** The room ID where the submission was made. */
   submissionRoomId?: string;
   /** The ID of the submission. */
-  submissionId?: string;
+  correlationId?: string;
   displayName?: string;
 };
 
@@ -324,7 +324,7 @@ export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"
   formVersion?: number;
   providerDirectMessageRoomId: string;
   submissionRoomId: string;
-  submissionId: string;
+  correlationId: string;
   submittedAt?: string;
   pretty?: boolean;
 };
@@ -335,7 +335,7 @@ export type ChatFormSubmissionMessage = ChatMessage & {
   payload: Record<string, unknown>;
   providerDirectMessageRoomId?: string;
   submissionRoomId?: string;
-  submissionId?: string;
+  correlationId?: string;
   formId?: string;
   providerUserId?: string;
   recordId?: string;
@@ -2308,9 +2308,9 @@ export function extractSubmissionId(metadata?: Record<string, unknown>): string 
     : undefined;
 
   return firstString(
-    metadata.submissionId,
-    lulaPayload?.submissionId,
-    lulaSubmission?.submissionId,
+    metadata.correlationId,
+    lulaPayload?.correlationId,
+    lulaSubmission?.correlationId,
   );
 }
 
@@ -2396,12 +2396,12 @@ export function buildChatMessageMetadata(input: {
   if (submissionRoomId) {
     metadata.submissionRoomId = submissionRoomId;
   }
-  const submissionId = firstString(
-    input.context?.submissionId,
+  const correlationId = firstString(
+    input.context?.correlationId,
     extractSubmissionId(metadata),
   );
-  if (submissionId) {
-    metadata.submissionId = submissionId;
+  if (correlationId) {
+    metadata.correlationId = correlationId;
   }
   if (typeof metadata.sentAtMs !== "number") {
     metadata.sentAtMs = Date.now();
@@ -2421,7 +2421,7 @@ export function buildChatMessageMetadata(input: {
   const shouldWriteSubmissionContext =
     context &&
     (typeof context.submissionRoomId === "string" ||
-      typeof context.submissionId === "string" ||
+      typeof context.correlationId === "string" ||
       typeof context.senderName === "string" ||
       typeof context.displayName === "string");
 
@@ -2434,7 +2434,7 @@ export function buildChatMessageMetadata(input: {
       ...existing,
       ...rest,
       ...(submissionRoomId ? { submissionRoomId } : {}),
-      ...(submissionId ? { submissionId } : {}),
+      ...(correlationId ? { correlationId } : {}),
       ...(displayName ? { displayName } : {}),
       ...(providerDirectMessageRoomId ? { providerDirectMessageRoomId } : {}),
     });
@@ -2454,7 +2454,7 @@ export function buildFormSubmissionMetadata(
     | "formVersion"
     | "providerDirectMessageRoomId"
     | "submissionRoomId"
-    | "submissionId"
+    | "correlationId"
     | "submittedAt"
   > & { displayName?: string },
 ): ChatMessageMetadata {
@@ -2468,8 +2468,8 @@ export function buildFormSubmissionMetadata(
     extractSubmissionRoomId(metadata),
     input.roomId,
   );
-  const submissionId = firstString(
-    input.submissionId,
+  const correlationId = firstString(
+    input.correlationId,
     extractSubmissionId(metadata),
   );
   const existingPayload = isRecord(metadata.lulaPayload)
@@ -2482,8 +2482,8 @@ export function buildFormSubmissionMetadata(
   if (submissionRoomId) {
     metadata.submissionRoomId = submissionRoomId;
   }
-  if (submissionId) {
-    metadata.submissionId = submissionId;
+  if (correlationId) {
+    metadata.correlationId = correlationId;
   }
   if (typeof metadata.sentAtMs !== "number") {
     metadata.sentAtMs = Date.now();
@@ -2496,7 +2496,7 @@ export function buildFormSubmissionMetadata(
   metadata.lulaPayload = removeUndefinedValues({
     ...existingPayload,
     submissionRoomId,
-    submissionId,
+    correlationId,
     formId: input.formId,
     providerUserId: input.providerUserId,
     recordId: input.recordId,
@@ -2551,7 +2551,7 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
   const metadata = message.metadata;
   const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata) ?? message.roomId;
   const submissionRoomId = extractSubmissionRoomId(metadata);
-  const submissionId = extractSubmissionId(metadata);
+  const correlationId = extractSubmissionId(metadata);
   const displayName = extractDisplayName(metadata) ?? message.fromUserId;
   const lulaSubmission = isRecord(metadata?.lulaSubmission)
     ? (metadata?.lulaSubmission as Record<string, unknown>)
@@ -2560,7 +2560,7 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
     ...(lulaSubmission ?? {}),
     ...(providerDirectMessageRoomId ? { providerDirectMessageRoomId } : {}),
     ...(submissionRoomId ? { submissionRoomId } : {}),
-    ...(submissionId ? { submissionId } : {}),
+    ...(correlationId ? { correlationId } : {}),
     ...(displayName ? { displayName } : {}),
   }) as ChatMessageContext;
 
@@ -2569,7 +2569,7 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
     metadata: normalizeMessageMetadata(message.metadata, "CHAT_MESSAGE"),
     providerDirectMessageRoomId,
     ...(submissionRoomId ? { submissionRoomId } : {}),
-    submissionId,
+    correlationId,
     displayName,
     ...(Object.keys(context).length > 0 ? { context } : {}),
   };
@@ -2584,7 +2584,7 @@ function toChatAttachmentMessage(message: ChatMessage): ChatAttachmentMessage {
   const metadata = message.metadata;
   const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata) ?? message.roomId;
   const submissionRoomId = extractSubmissionRoomId(metadata);
-  const submissionId = extractSubmissionId(metadata);
+  const correlationId = extractSubmissionId(metadata);
   const displayName = extractDisplayName(metadata);
   const lulaSubmission = isRecord(metadata?.lulaSubmission)
     ? (metadata?.lulaSubmission as Record<string, unknown>)
@@ -2593,7 +2593,7 @@ function toChatAttachmentMessage(message: ChatMessage): ChatAttachmentMessage {
     ...(lulaSubmission ?? {}),
     ...(providerDirectMessageRoomId ? { providerDirectMessageRoomId } : {}),
     ...(submissionRoomId ? { submissionRoomId } : {}),
-    ...(submissionId ? { submissionId } : {}),
+    ...(correlationId ? { correlationId } : {}),
     ...(displayName ? { displayName } : {}),
   }) as ChatMessageContext;
 
@@ -2603,7 +2603,7 @@ function toChatAttachmentMessage(message: ChatMessage): ChatAttachmentMessage {
     metadata: normalizeMessageMetadata(message.metadata, "CHAT_MESSAGE"),
     providerDirectMessageRoomId,
     ...(submissionRoomId ? { submissionRoomId } : {}),
-    submissionId,
+    correlationId,
     ...(displayName ? { displayName } : {}),
     ...(Object.keys(context).length > 0 ? { context } : {}),
   };
@@ -2645,7 +2645,7 @@ function parseFormSubmissionMessage(message: ChatMessage): ChatFormSubmissionMes
 
   const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata) ?? message.roomId;
   const submissionRoomId = extractSubmissionRoomId(metadata);
-  const submissionId = extractSubmissionId(metadata);
+  const correlationId = extractSubmissionId(metadata);
   const displayName = extractDisplayName(metadata);
   const normalizedFormPayload = normalizeFormSubmissionPayload(payload);
   return {
@@ -2656,7 +2656,7 @@ function parseFormSubmissionMessage(message: ChatMessage): ChatFormSubmissionMes
     payload,
     providerDirectMessageRoomId: providerDirectMessageRoomId,
     ...(submissionRoomId ? { submissionRoomId } : {}),
-    ...(submissionId ? { submissionId } : {}),
+    ...(correlationId ? { correlationId } : {}),
     formId: firstString(lulaPayload?.formId, payload.formId),
     providerUserId: firstString(lulaPayload?.providerUserId, payload.providerUserId),
     recordId: firstString(lulaPayload?.recordId, payload.recordId),
