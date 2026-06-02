@@ -61,7 +61,7 @@ await sendChatMessage({
   roomId: room.roomId,
   body: "Hello again",
   context: {
-    submissionId: "submission-123",
+    correlationId: "submission-123",
     displayName: "Agent",
   },
 });
@@ -193,7 +193,7 @@ await chatClient.sendChatMessage({
   peerDeviceId,
   body: "Thanks for the submission.",
   context: {
-    submissionId,
+    correlationId,
     displayName: "Agent",
   },
 });
