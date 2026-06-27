@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lula XMPP Test Client</title>
+    <script>
+      window.__xmppTransportEvents = [];
+      window.__xmppTransportLog = null;
+      const NativeWebSocket = window.WebSocket;
+      window.WebSocket = class DebugWebSocket extends NativeWebSocket {
+        constructor(url, protocols) {
+          if (protocols === undefined) {
+            super(url);
+          } else {
+            super(url, protocols);
+          }
+          this.report(`WEBSOCKET creating url=${url}`);
+          this.addEventListener("open", () => {
+            this.report(`WEBSOCKET open protocol=${this.protocol || "(none)"}`);
+          });
+          this.addEventListener("error", () => {
+            this.report(
+              "WEBSOCKET error. The browser hides the handshake HTTP status. Check its Network panel for the response.",
+            );
+          });
+          this.addEventListener("close", (event) => {
+            const description = window.describeCloseCode?.(event.code) || "";
+            this.report(
+              `WEBSOCKET close code=${event.code} clean=${event.wasClean} reason=${event.reason || "(none)"} ${description}`,
+            );
+          });
+        }
+
+        report(message) {
+          if (window.__xmppTransportLog) {
+            window.__xmppTransportLog(message);
+          } else {
+            window.__xmppTransportEvents.push(message);
+          }
+        }
+      };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/strophe.js@3.1.1/dist/strophe.umd.min.js"></script>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: system-ui, sans-serif;
+        background: #f4f5f7;
+        color: #17202a;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 24px; }
+      main {
+        width: min(920px, 100%);
+        margin: 0 auto;
+        background: white;
+        border: 1px solid #dfe3e8;
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 8px 28px rgb(23 32 42 / 8%);
+      }
+      h1 { margin: 0 0 6px; font-size: 24px; }
+      p { margin: 0 0 20px; color: #52606d; }
+      form { display: grid; gap: 14px; }
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+      label { display: grid; gap: 6px; font-size: 13px; font-weight: 650; }
+      input, select, button {
+        width: 100%;
+        border: 1px solid #c8d0d9;
+        border-radius: 8px;
+        padding: 10px 12px;
+        font: inherit;
+      }
+      input:focus, select:focus { outline: 2px solid #2367d1; border-color: transparent; }
+      button {
+        border: 0;
+        background: #2367d1;
+        color: white;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button.secondary { background: #e8edf3; color: #17202a; }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .status {
+        margin: 18px 0 10px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: #eef2f6;
+        font-weight: 700;
+      }
+      .log-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 14px 0 8px;
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .log-toolbar button {
+        width: auto;
+        padding: 7px 12px;
+      }
+      #log {
+        height: 280px;
+        overflow: auto;
+        margin: 0;
+        padding: 14px;
+        border-radius: 8px;
+        background: #101820;
+        color: #dce7f2;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font: 13px/1.5 ui-monospace, monospace;
+      }
+      @media (max-width: 680px) {
+        body { padding: 10px; }
+        main { padding: 16px; }
+        .grid, .actions { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Lula XMPP Test Client</h1>
+      <p>Connect through WebSocket and log transport, XMPP, and message events.</p>
+
+      <form id="connection-form">
+        <div class="grid">
+          <label>
+            WebSocket URL
+            <input id="service" placeholder="wss://api.dev.lulafi.co/chat/websocket" required />
+          </label>
+          <label>
+            Account JID
+            <input id="jid" placeholder="user@example.com" required />
+          </label>
+          <label>
+            Password, visible
+            <input id="password" type="text" autocomplete="off" spellcheck="false" required />
+          </label>
+          <label>
+            Authentication mode
+            <select id="auth-mode">
+              <option value="PLAIN" selected>PLAIN</option>
+              <option value="SCRAM-SHA-1">SCRAM-SHA-1</option>
+              <option value="SCRAM-SHA-256">SCRAM-SHA-256</option>
+              <option value="SCRAM-SHA-384">SCRAM-SHA-384</option>
+              <option value="SCRAM-SHA-512">SCRAM-SHA-512</option>
+              <option value="AUTO">Automatic negotiation</option>
+            </select>
+          </label>
+          <label>
+            Resource
+            <input id="resource" value="test-client" required />
+          </label>
+        </div>
+        <div class="actions">
+          <button id="connect" type="submit">Connect</button>
+          <button id="disconnect" class="secondary" type="button" disabled>Disconnect</button>
+        </div>
+      </form>
+
+      <div id="status" class="status">Disconnected</div>
+      <div class="log-toolbar">
+        <span>Event log</span>
+        <button id="clear-log" class="secondary" type="button">Clear log</button>
+      </div>
+      <pre id="log" aria-live="polite"></pre>
+    </main>
+
+    <script>
+      const fields = {
+        service: document.querySelector("#service"),
+        jid: document.querySelector("#jid"),
+        password: document.querySelector("#password"),
+        authMode: document.querySelector("#auth-mode"),
+        resource: document.querySelector("#resource"),
+      };
+      const connectionForm = document.querySelector("#connection-form");
+      const connectButton = document.querySelector("#connect");
+      const disconnectButton = document.querySelector("#disconnect");
+      const clearLogButton = document.querySelector("#clear-log");
+      const statusBox = document.querySelector("#status");
+      const logBox = document.querySelector("#log");
+      let connection = null;
+      let connectedOnce = false;
+      let manualDisconnect = false;
+      let startedAt = 0;
+
+      window.__xmppTransportLog = log;
+      window.__xmppTransportEvents.splice(0).forEach(log);
+
+      const nativeConsoleError = console.error.bind(console);
+      const nativeConsoleWarn = console.warn.bind(console);
+      console.error = (...values) => {
+        nativeConsoleError(...values);
+        log(`CONSOLE ERROR: ${values.map(formatValue).join(" ")}`);
+      };
+      console.warn = (...values) => {
+        nativeConsoleWarn(...values);
+        log(`CONSOLE WARN: ${values.map(formatValue).join(" ")}`);
+      };
+
+      Strophe.log = (level, message) => {
+        const names = {
+          [Strophe.LogLevel.DEBUG]: "DEBUG",
+          [Strophe.LogLevel.INFO]: "INFO",
+          [Strophe.LogLevel.WARN]: "WARN",
+          [Strophe.LogLevel.ERROR]: "ERROR",
+          [Strophe.LogLevel.FATAL]: "FATAL",
+        };
+        log(`STROPHE ${names[level] || level}: ${message}`);
+      };
+
+      window.addEventListener("error", (event) => {
+        log(
+          `PAGE ERROR: ${event.message || "Unknown error"}${event.filename ? ` at ${event.filename}:${event.lineno}:${event.colno}` : ""}`,
+        );
+      });
+      window.addEventListener("unhandledrejection", (event) => {
+        log(`PROMISE ERROR: ${formatValue(event.reason)}`);
+      });
+      document.addEventListener("securitypolicyviolation", (event) => {
+        log(`SECURITY POLICY: blocked=${event.blockedURI} directive=${event.effectiveDirective}`);
+      });
+
+      fields.jid.addEventListener("input", () => {
+        if (!fields.service.dataset.edited) {
+          const domain = fields.jid.value.trim().split("@")[1]?.split("/")[0];
+          fields.service.value = domain ? `wss://${domain}/chat/websocket` : "";
+        }
+      });
+      fields.service.addEventListener("input", () => {
+        fields.service.dataset.edited = "true";
+      });
+
+      connectionForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        connect();
+      });
+      disconnectButton.addEventListener("click", disconnect);
+      clearLogButton.addEventListener("click", () => {
+        logBox.textContent = "";
+      });
+
+      function connect() {
+        logBox.textContent = "";
+        connectedOnce = false;
+        manualDisconnect = false;
+        startedAt = Date.now();
+        connectButton.disabled = true;
+        disconnectButton.disabled = false;
+
+        const bareJid = fields.jid.value.trim().split("/")[0];
+        const jid = `${bareJid}/${fields.resource.value.trim()}`;
+        let service;
+
+        try {
+          service = normalizeServiceUrl(fields.service.value);
+        } catch (error) {
+          setStatus("Configuration error");
+          log(`CONFIG ERROR: ${formatValue(error)}`);
+          setConnectionActive(false);
+          return;
+        }
+
+        log(`RESULT Starting connection test`);
+        log(`Transport: WebSocket`);
+        log(`Endpoint: ${service}`);
+        log(`Account: ${jid}`);
+        log(
+          `SASL mode: ${fields.authMode.value}${fields.authMode.value === "AUTO" ? "" : " (forced)"}`,
+        );
+        log(`Page origin: ${window.location.origin}`);
+
+        try {
+          connection = new Strophe.Connection(service, {
+            mechanisms: getMechanismOptions(fields.authMode.value),
+          });
+        } catch (error) {
+          setStatus("Client setup failed");
+          log(`CLIENT ERROR: ${formatValue(error)}`);
+          setConnectionActive(false);
+          return;
+        }
+        connection.rawInput = (data) => log(`RECV ${data}`);
+        connection.rawOutput = (data) => log(`SEND ${redactAuth(data)}`);
+        connection.xmlInput = (element) => log(`XML IN ${serializeXml(element)}`);
+        connection.xmlOutput = (element) => log(`XML OUT ${redactAuth(serializeXml(element))}`);
+        connection.addHandler(onMessage, null, "message");
+        try {
+          connection.connect(jid, fields.password.value, onStatus);
+        } catch (error) {
+          setStatus("Connection call failed");
+          log(`CONNECT ERROR: ${formatValue(error)}`);
+          setConnectionActive(false);
+          connection = null;
+        }
+      }
+
+      function disconnect() {
+        if (!connection) return;
+        manualDisconnect = true;
+        setStatus("Disconnecting");
+        connection.disconnect("User requested disconnect");
+      }
+
+      function onStatus(status, condition) {
+        const labels = {
+          [Strophe.Status.ERROR]: "Error",
+          [Strophe.Status.CONNECTING]: "Connecting",
+          [Strophe.Status.CONNFAIL]: "Connection failed",
+          [Strophe.Status.AUTHENTICATING]: "Authenticating",
+          [Strophe.Status.AUTHFAIL]: "Authentication failed",
+          [Strophe.Status.CONNECTED]: "Connected",
+          [Strophe.Status.DISCONNECTED]: "Disconnected",
+          [Strophe.Status.DISCONNECTING]: "Disconnecting",
+          [Strophe.Status.ATTACHED]: "Attached",
+          [Strophe.Status.REDIRECT]: "Redirected",
+          [Strophe.Status.BINDREQUIRED]: "Resource binding required",
+        };
+        const label = labels[status] || `Status ${status}`;
+        const detail = formatCondition(condition);
+        setStatus(detail ? `${label}: ${detail}` : label);
+        log(`STATUS CODE ${status}${detail ? ` condition=${detail}` : ""}`);
+
+        if (status === Strophe.Status.CONNECTED) {
+          connectedOnce = true;
+          connection.send($pres());
+          setConnectionActive(true);
+          log(`RESULT Connected in ${Date.now() - startedAt} ms`);
+          log("Listening for incoming messages.");
+        }
+        if (
+          status === Strophe.Status.CONNFAIL ||
+          status === Strophe.Status.AUTHFAIL
+        ) {
+          log(`RESULT ${label}${detail ? `: ${detail}` : ""}`);
+        }
+        if (status === Strophe.Status.DISCONNECTED) {
+          if (!connectedOnce && !manualDisconnect) {
+            log(`RESULT Failed before an XMPP session opened after ${Date.now() - startedAt} ms`);
+          }
+          setConnectionActive(false);
+          connection = null;
+        }
+      }
+
+      function onMessage(stanza) {
+        const from = stanza.getAttribute("from") || "unknown";
+        const id = stanza.getAttribute("id");
+        const body = stanza.getElementsByTagName("body")[0]?.textContent;
+        const thread = stanza.getElementsByTagName("thread")[0]?.textContent;
+
+        if (body !== undefined) {
+          log(
+            `MESSAGE ${from}${id ? ` id=${id}` : ""}${thread ? ` room=${thread}` : ""}\n${body}`,
+          );
+        } else {
+          log(`MESSAGE ${from}${id ? ` id=${id}` : ""} (no body)`);
+        }
+        return true;
+      }
+
+      function setConnectionActive(active) {
+        disconnectButton.disabled = !active;
+        connectButton.disabled = active;
+      }
+
+      function setStatus(text) {
+        statusBox.textContent = text;
+        log(`STATUS ${text}`);
+      }
+
+      function log(text) {
+        const time = new Date().toLocaleTimeString();
+        logBox.textContent += `[${time}] ${text}\n`;
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+
+      function redactAuth(xml) {
+        if (!xml.includes("<auth")) return xml;
+        return xml.replace(/(<auth[^>]*>)[\s\S]*?(<\/auth>)/, "$1[redacted]$2");
+      }
+
+      function normalizeServiceUrl(value) {
+        const raw = value.trim();
+        const url = new URL(raw);
+        if (url.protocol === "https:" || url.protocol === "http:") {
+          const oldUrl = url.toString();
+          url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+          fields.service.value = url.toString();
+          log(`CONFIG corrected ${oldUrl} to ${url.toString()}`);
+        }
+        if (url.protocol !== "wss:" && url.protocol !== "ws:") {
+          throw new Error(`WebSocket URL must start with wss:// or ws://, received ${url.protocol}`);
+        }
+        return url.toString();
+      }
+
+      function getMechanismOptions(mode) {
+        const mechanisms = {
+          PLAIN: Strophe.SASLPlain,
+          "SCRAM-SHA-1": Strophe.SASLSHA1,
+          "SCRAM-SHA-256": Strophe.SASLSHA256,
+          "SCRAM-SHA-384": Strophe.SASLSHA384,
+          "SCRAM-SHA-512": Strophe.SASLSHA512,
+        };
+        return mode === "AUTO" ? undefined : [mechanisms[mode]];
+      }
+
+      function describeCloseCode(code) {
+        const descriptions = {
+          1000: "Normal closure.",
+          1001: "Endpoint went away.",
+          1002: "Protocol error.",
+          1003: "Unsupported data.",
+          1006: "Abnormal closure. No close frame reached the browser.",
+          1007: "Invalid payload.",
+          1008: "Policy violation.",
+          1009: "Message too large.",
+          1011: "Server error.",
+          1015: "TLS handshake failure.",
+        };
+        return descriptions[code] || "Unregistered close code.";
+      }
+
+      function formatCondition(condition) {
+        if (condition === undefined || condition === null || condition === "") return "";
+        if (condition instanceof Element) return serializeXml(condition);
+        return formatValue(condition);
+      }
+
+      function formatValue(value) {
+        if (value instanceof Error) return value.stack || value.message;
+        if (typeof value === "string") return value;
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      }
+
+      function serializeXml(element) {
+        if (typeof element === "string") return element;
+        try {
+          return new XMLSerializer().serializeToString(element);
+        } catch (error) {
+          return `[XML serialization failed: ${formatValue(error)}]`;
+        }
+      }
+    </script>
+  </body>
+</html>

@@ -118,6 +118,38 @@ Allowed resources:
 - `ios-secondary-client`
 - `android-secondary-client`
 
+## Manual XMPP Test Clients
+
+Use `test-client.html` for a browser test:
+
+```sh
+python3 -m http.server 8080
+```
+
+Open `http://localhost:8080/test-client.html`. Enter one account to test the
+WebSocket connection and log incoming messages. The page loads Strophe.js from
+jsDelivr.
+
+The browser client defaults to SASL `PLAIN`. Its authentication selector can
+force one SCRAM mode or let Strophe negotiate with the server.
+
+Use `test-client.js` for a terminal test:
+
+```sh
+node test-client.js \
+  --jid ACCOUNT_JID \
+  --password PASSWORD
+```
+
+The client connects and logs incoming messages. Set a recipient with
+`/to RECIPIENT_JID` to send a test message. Run `/help` for the terminal
+commands.
+
+Both clients accept standard XMPP JIDs and send plain XMPP chat stanzas. They
+do not import this SDK or copy its account rules. They test WebSocket access,
+authentication, routing, messages, and delivery receipts. They do not encrypt
+message bodies.
+
 ## API
 
 `init(config)` returns:

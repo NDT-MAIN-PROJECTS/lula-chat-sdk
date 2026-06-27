@@ -28,7 +28,8 @@
     "start": "npm run build:js -- --watch",
     "test": "npm run typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "bump": "npm version prerelease"
+    "bump": "npm version prerelease",
+    "start:test-client": "python3 -m http.server 8080"
   },
   "publishConfig": {
     "access": "restricted"
