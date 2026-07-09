@@ -3,7 +3,12 @@
 Typed chat client for React Native and Node services.
 
 ```ts
-import { createRoomDirectory, init } from "@hubnet-systems/chat-sdk";
+import {
+  createRoomDirectory,
+  getChatDeviceId,
+  getChatUserId,
+  init,
+} from "@hubnet-systems/chat-sdk";
 
 const roomDirectory = createRoomDirectory({
   currentUserId: "6a0dce078d45ca01adbdd4f7",
@@ -37,6 +42,15 @@ const {
 } = chatClient;
 
 const ownAddress = getChatAddressObject();
+const peerUserId = getChatUserId({
+  username: "peer-user-id",
+  domain: "api.dev.lulafi.co",
+});
+const peerDeviceId = getChatDeviceId({
+  username: "peer-user-id",
+  deviceName: "d0eb68ad2ff10ee7",
+  domain: "api.dev.lulafi.co",
+});
 
 onChatMessage((message) => {
   console.log(message.fromUserId, message.fromDeviceId, message.body);
@@ -167,6 +181,8 @@ message bodies.
 - `onStatus(listener)` for connection state.
 - `getAddress()` for the current bare chat address.
 - `getChatAddressObject()` for the current chat address, user id, device id, localpart, and domain.
+- `getChatUserId({ username, domain })` for a chat address without a device resource.
+- `getChatDeviceId({ username, deviceName, domain })` for a device-specific chat address.
 - `getDomain()` for the normalized chat domain.
 - `getUserId()` for the current app user id.
 - `sendChatMessage({ roomId, body })` to send human chat text.

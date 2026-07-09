@@ -322,6 +322,17 @@ export type ChatAddressInput = {
     userId: string;
     deviceId: DeviceId;
 };
+export type ChatUserIdInput = {
+    username: string;
+    domain: string;
+};
+export type ChatDeviceIdInput = ChatUserIdInput & ({
+    deviceName: string;
+    devicename?: never;
+} | {
+    devicename: string;
+    deviceName?: never;
+});
 export type CreateDeviceIdOptions = {
     prefix?: string;
 };
@@ -435,6 +446,8 @@ type XmppElementLike = {
 export declare function init(config: ChatClientConfig): ChatClient;
 export declare function createChatClient(config: ChatClientConfig): ChatClient;
 export declare function createDeviceId(options?: CreateDeviceIdOptions): DeviceId;
+export declare function getChatUserId(input: ChatUserIdInput): string;
+export declare function getChatDeviceId(input: ChatDeviceIdInput): DeviceId;
 export declare function getChatAddress(input: ChatAddressInput): ChatAddress;
 export declare function createRoomDirectory(options: ChatRoomDirectoryOptions): ChatRoomDirectory;
 export declare function createOmemoEncryption(options?: OmemoEncryptionOptions): ChatEncryption;
