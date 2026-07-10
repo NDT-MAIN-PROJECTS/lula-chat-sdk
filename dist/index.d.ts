@@ -6,7 +6,6 @@ export type DeviceId = string;
 export type ChatMessageMetadata = Record<string, unknown> & {
     messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION";
 };
-export type ChatResource = string;
 export type ChatLogLevel = "silent" | "error" | "warn" | "info" | "debug";
 export type ChatLogger = {
     debug?: (message: string, data?: Record<string, unknown>) => void;
@@ -111,7 +110,7 @@ export type ChatAttachmentService = {
 export type ChatClientBaseConfig = {
     /** API key for app access to the chat service. */
     apiKey: string;
-    /** WebSocket path on the chat domain. Defaults to "/chat/websocket". */
+    /** WebSocket path on the chat domain, or a full ws(s) URL. Defaults to "/chat/websocket". */
     xmppWebSocketPath?: string;
     /** Chat service domain, for example "api.dev.lulafi.co". */
     xmppDomain: string;
@@ -123,11 +122,6 @@ export type ChatClientBaseConfig = {
     deviceId: DeviceId;
     /** Display name written to outgoing message metadata. */
     displayName?: string;
-    /**
-     * XMPP resource bound for this device. Defaults to `deviceId`, so the live
-     * session address is `<user>@<domain>/<deviceId>`.
-     */
-    resource?: ChatResource;
     /** Reconnect after transient connection loss. */
     autoReconnect?: boolean;
     /** Connection timeout in milliseconds. Defaults to 15000. */
@@ -328,13 +322,10 @@ export type ChatUserIdInput = {
     username: string;
     domain: string;
 };
-export type ChatDeviceIdInput = ChatUserIdInput & ({
-    deviceName: string;
-    devicename?: never;
-} | {
-    devicename: string;
-    deviceName?: never;
-});
+export type ChatDeviceIdInput = ChatUserIdInput & {
+    deviceId?: DeviceId;
+    deviceName?: DeviceId;
+};
 export type CreateDeviceIdOptions = {
     prefix?: string;
 };
@@ -448,9 +439,9 @@ type XmppElementLike = {
 export declare function init(config: ChatClientConfig): ChatClient;
 export declare function createChatClient(config: ChatClientConfig): ChatClient;
 export declare function createDeviceId(options?: CreateDeviceIdOptions): DeviceId;
-export declare function getChatUserId(input: ChatUserIdInput): string;
-export declare function getChatDeviceId(input: ChatDeviceIdInput): DeviceId;
 export declare function getChatAddress(input: ChatAddressInput): ChatAddress;
+export declare function getChatUserId(input: ChatUserIdInput): DeviceId;
+export declare function getChatDeviceId(input: ChatDeviceIdInput): DeviceId;
 export declare function createRoomDirectory(options: ChatRoomDirectoryOptions): ChatRoomDirectory;
 export declare function createOmemoEncryption(options?: OmemoEncryptionOptions): ChatEncryption;
 export declare function extractProviderDirectMessageRoomId(metadata?: Record<string, unknown>): string | undefined;
