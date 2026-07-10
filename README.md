@@ -116,7 +116,7 @@ init({
 });
 ```
 
-`xmppWebSocketPath` is optional. The default is `/chat/websocket`.
+`xmppWebSocketPath` is optional. The default is `/chat/websocket`. It can also be a full local/proxy URL such as `ws://192.168.100.10:8088/chat/websocket`.
 
 The SDK connects to `wss://api.dev.lulafi.co/chat/websocket`.
 
@@ -124,7 +124,6 @@ The SDK connects to `wss://api.dev.lulafi.co/chat/websocket`.
 
 The SDK binds the local `deviceId` as the XMPP resource by default. A device
 with `userId: "u1"` and `deviceId: "d1"` connects as `i.u1@<domain>/d1`.
-Set `resource` only when the bound resource must differ from `deviceId`.
 
 ## Manual XMPP Test Clients
 
@@ -223,6 +222,34 @@ const chatClient = init({
 `resolveRoomDeviceIds` still works as a fallback room fanout provider. New code should prefer `roomDirectory`.
 
 The SDK client exposes `getPeerDeviceIds(roomId)`. That gives app code one SDK method to ask for the current fanout targets, no matter if they came from cache, incoming messages, or a configured provider.
+
+## User Resources and Message Carbons
+
+The SDK uses one XMPP account per app user and the device id as the XMPP resource:
+`i.<user>@domain/<deviceId>`.
+
+Message Carbons (XEP-0280) are enabled after every successful connection, so ejabberd can copy direct-chat messages across the user's active resources. Room-directory peers should resolve to bare user JIDs such as `i.<peer>@domain`; full resource JIDs can still be passed explicitly with `toDeviceId` / `toDeviceIds` for device-specific sync or control messages.
+
+```ts
+const roomDirectory = createRoomDirectory({
+  currentUserId,
+  xmppDomain,
+  getOrCreateRoom: ({ userId }) => api.post("/chats/rooms", { userId }),
+  getRoom: (roomId) => api.get(`/chats/rooms/${roomId}`),
+});
+
+const chatClient = init({
+  xmppDomain,
+  userId,
+  deviceId,
+  authType: "x-oauth2",
+  accessToken,
+  roomDirectory,
+  encryption: createOmemoEncryption({ storage }),
+});
+```
+
+The API must issue XMPP credentials for the bare account `i.<user>@domain`.
 
 ## Chat vs Form Payloads
 
