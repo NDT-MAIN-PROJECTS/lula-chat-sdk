@@ -6,8 +6,7 @@ export type DeviceId = string;
 export type ChatMessageMetadata = Record<string, unknown> & {
     messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION";
 };
-export declare const chatResources: readonly ["server-client", "ios-primary-client", "android-primary-client", "ios-secondary-client", "android-secondary-client"];
-export type ChatResource = (typeof chatResources)[number];
+export type ChatResource = string;
 export type ChatLogLevel = "silent" | "error" | "warn" | "info" | "debug";
 export type ChatLogger = {
     debug?: (message: string, data?: Record<string, unknown>) => void;
@@ -124,8 +123,11 @@ export type ChatClientBaseConfig = {
     deviceId: DeviceId;
     /** Display name written to outgoing message metadata. */
     displayName?: string;
-    /** Device resource label, such as "ios-primary-client" or "server-client". */
-    resource: ChatResource;
+    /**
+     * XMPP resource bound for this device. Defaults to `deviceId`, so the live
+     * session address is `<user>@<domain>/<deviceId>`.
+     */
+    resource?: ChatResource;
     /** Reconnect after transient connection loss. */
     autoReconnect?: boolean;
     /** Connection timeout in milliseconds. Defaults to 15000. */

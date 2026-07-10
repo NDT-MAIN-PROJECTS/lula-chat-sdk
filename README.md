@@ -23,7 +23,6 @@ const chatClient = init({
   deviceId: "d0eb68ad2ff10ee7",
   displayName: "Taylor Morgan",
   password: "secret",
-  resource: "ios-primary-client",
   roomDirectory,
 });
 
@@ -114,7 +113,6 @@ init({
   deviceId: "d0eb68ad2ff10ee7",
   displayName: "Taylor Morgan",
   password: "secret",
-  resource: "ios-primary-client",
 });
 ```
 
@@ -124,13 +122,9 @@ The SDK connects to `wss://api.dev.lulafi.co/chat/websocket`.
 
 `displayName` is written into outgoing message metadata as `metadata.displayName`.
 
-Allowed resources:
-
-- `server-client`
-- `ios-primary-client`
-- `android-primary-client`
-- `ios-secondary-client`
-- `android-secondary-client`
+The SDK binds the local `deviceId` as the XMPP resource by default. A device
+with `userId: "u1"` and `deviceId: "d1"` connects as `i.u1@<domain>/d1`.
+Set `resource` only when the bound resource must differ from `deviceId`.
 
 ## Manual XMPP Test Clients
 
@@ -220,7 +214,6 @@ const chatClient = init({
   userId,
   deviceId,
   password,
-  resource: "server-client",
   roomDirectory,
 });
 ```
@@ -280,7 +273,6 @@ const chatClient = init({
   userId: process.env.CHAT_USER_ID!,
   deviceId: process.env.CHAT_DEVICE_ID!,
   password: process.env.CHAT_PASSWORD!,
-  resource: "server-client",
 });
 ```
 
@@ -293,7 +285,6 @@ const chatClient = init({
   deviceId,
   accessToken,
   authType: "x-oauth2",
-  resource: "server-client",
 });
 ```
 
@@ -321,7 +312,6 @@ const chatClient = init({
   userId,
   deviceId,
   accessToken,
-  resource: "ios-primary-client",
   encryption: createOmemoEncryption({
     storage: storageBackends.indexDb,
   }),
@@ -341,7 +331,6 @@ const chatClient = init({
   userId,
   deviceId,
   accessToken,
-  resource: "ios-primary-client",
   encryption: createOmemoEncryption({ storage }),
 });
 ```
@@ -360,7 +349,6 @@ const chatClient = init({
   userId,
   deviceId,
   password,
-  resource: "server-client",
   encryption: createOmemoEncryption({ storage }),
 });
 ```
@@ -377,7 +365,6 @@ const chatClient = init({
   userId,
   deviceId,
   password,
-  resource: "server-client",
   encryption: createOmemoEncryption({ storage }),
 });
 ```

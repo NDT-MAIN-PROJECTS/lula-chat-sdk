@@ -27,15 +27,7 @@ export type ChatMessageMetadata = Record<string, unknown> & {
   messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION";
 };
 
-export const chatResources = [
-  "server-client",
-  "ios-primary-client",
-  "android-primary-client",
-  "ios-secondary-client",
-  "android-secondary-client",
-] as const;
-
-export type ChatResource = (typeof chatResources)[number];
+export type ChatResource = string;
 
 export type ChatLogLevel = "silent" | "error" | "warn" | "info" | "debug";
 
@@ -192,8 +184,11 @@ export type ChatClientBaseConfig = {
   /** Display name written to outgoing message metadata. */
   displayName?: string;
 
-  /** Device resource label, such as "ios-primary-client" or "server-client". */
-  resource: ChatResource;
+  /**
+   * XMPP resource bound for this device. Defaults to `deviceId`, so the live
+   * session address is `<user>@<domain>/<deviceId>`.
+   */
+  resource?: ChatResource;
 
   /** Reconnect after transient connection loss. */
   autoReconnect?: boolean;
@@ -2259,7 +2254,7 @@ type NormalizedConfig = {
   password?: string;
   authType: "password" | "x-oauth2";
   domain: string;
-  resource?: ChatResource;
+  resource: ChatResource;
   connectTimeoutMs: number;
   roomDirectory?: ChatRoomDirectory;
   resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
@@ -2297,7 +2292,7 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
         : trimToUndefined(config.password),
     authType: config.authType ?? "password",
     domain,
-    resource: normalizeResource(config.resource),
+    resource: normalizeResource(config.resource ?? localDeviceId),
     connectTimeoutMs: config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
     roomDirectory: config.roomDirectory,
     resolveRoomDeviceIds: config.resolveRoomDeviceIds,
@@ -2979,15 +2974,14 @@ function normalizeUserIdSegment(value?: string): string | undefined {
   if (!trimmed) return undefined;
   const localpart = normalizeBareDeviceId(trimmed).split("@")[0]?.trim();
   const withoutPrefix = localpart?.replace(/^i\./, "");
-  return withoutPrefix?.replace(/\.d\..*$/, "") || undefined;
+  return withoutPrefix || undefined;
 }
 
 function getUserIdFromChatAddress(value?: string): string | undefined {
   const localpart = normalizeBareDeviceId(value).split("@")[0]?.trim();
   if (!localpart) return undefined;
   const withoutPrefix = localpart.startsWith("i.") ? localpart.slice(2) : localpart;
-  const deviceMarker = withoutPrefix.indexOf(".d.");
-  return (deviceMarker >= 0 ? withoutPrefix.slice(0, deviceMarker) : withoutPrefix) || undefined;
+  return withoutPrefix || undefined;
 }
 
 function normalizeDeviceIdSegment(value?: string): string | undefined {
@@ -2996,8 +2990,7 @@ function normalizeDeviceIdSegment(value?: string): string | undefined {
   const resource = trimmed.split("/")[1]?.trim();
   if (resource) return resource;
   const localpart = normalizeBareDeviceId(trimmed).split("@")[0]?.trim();
-  const deviceMarker = localpart?.indexOf(".d.") ?? -1;
-  return deviceMarker >= 0 ? localpart?.slice(deviceMarker + 3) || undefined : localpart;
+  return localpart || undefined;
 }
 
 function normalizeChatDeviceId(deviceId?: string | null): DeviceId {
@@ -3019,11 +3012,10 @@ function trimToUndefined(value?: string | null): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-function normalizeResource(value?: ChatResource): ChatResource | undefined {
-  const resource = trimToUndefined(value);
-  if (!resource) return undefined;
-  if ((chatResources as readonly string[]).includes(resource)) return resource as ChatResource;
-  throw new Error(`chat_resource_invalid:${resource}`);
+function normalizeResource(value?: string): ChatResource {
+  const resource = normalizeDeviceIdSegment(value);
+  if (!resource) throw new Error("chat_resource_invalid");
+  return resource;
 }
 
 function normalizeLogLevel(level: ChatLogLevel | undefined, logger?: ChatLogger): ChatLogLevel {

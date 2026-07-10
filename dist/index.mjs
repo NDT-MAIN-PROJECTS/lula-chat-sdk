@@ -7,13 +7,6 @@ import { randomBytes as nobleRandomBytes } from "@noble/hashes/utils.js";
 import { client as createXmppClient, xml } from "@xmpp/client";
 import { customAlphabet } from "nanoid/non-secure";
 import saslMechanisms from "saslmechanisms";
-var chatResources = [
-  "server-client",
-  "ios-primary-client",
-  "android-primary-client",
-  "ios-secondary-client",
-  "android-secondary-client"
-];
 var XMPP_CHAT_NS = "urn:lula:defy:chat:1";
 var XMPP_RECEIPTS_NS = "urn:xmpp:receipts";
 var XMPP_CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0";
@@ -1402,7 +1395,7 @@ function normalizeConfig(config) {
     password: config.authType === "x-oauth2" ? trimToUndefined(config.accessToken) : trimToUndefined(config.password),
     authType: config.authType ?? "password",
     domain,
-    resource: normalizeResource(config.resource),
+    resource: normalizeResource(config.resource ?? localDeviceId),
     connectTimeoutMs: config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
     roomDirectory: config.roomDirectory,
     resolveRoomDeviceIds: config.resolveRoomDeviceIds,
@@ -1914,14 +1907,13 @@ function normalizeUserIdSegment(value) {
   if (!trimmed) return void 0;
   const localpart = normalizeBareDeviceId(trimmed).split("@")[0]?.trim();
   const withoutPrefix = localpart?.replace(/^i\./, "");
-  return withoutPrefix?.replace(/\.d\..*$/, "") || void 0;
+  return withoutPrefix || void 0;
 }
 function getUserIdFromChatAddress(value) {
   const localpart = normalizeBareDeviceId(value).split("@")[0]?.trim();
   if (!localpart) return void 0;
   const withoutPrefix = localpart.startsWith("i.") ? localpart.slice(2) : localpart;
-  const deviceMarker = withoutPrefix.indexOf(".d.");
-  return (deviceMarker >= 0 ? withoutPrefix.slice(0, deviceMarker) : withoutPrefix) || void 0;
+  return withoutPrefix || void 0;
 }
 function normalizeDeviceIdSegment(value) {
   const trimmed = trimToUndefined(value);
@@ -1929,8 +1921,7 @@ function normalizeDeviceIdSegment(value) {
   const resource = trimmed.split("/")[1]?.trim();
   if (resource) return resource;
   const localpart = normalizeBareDeviceId(trimmed).split("@")[0]?.trim();
-  const deviceMarker = localpart?.indexOf(".d.") ?? -1;
-  return deviceMarker >= 0 ? localpart?.slice(deviceMarker + 3) || void 0 : localpart;
+  return localpart || void 0;
 }
 function normalizeChatDeviceId(deviceId) {
   const value = addressToString(deviceId)?.trim();
@@ -1949,10 +1940,9 @@ function trimToUndefined(value) {
   return trimmed ? trimmed : void 0;
 }
 function normalizeResource(value) {
-  const resource = trimToUndefined(value);
-  if (!resource) return void 0;
-  if (chatResources.includes(resource)) return resource;
-  throw new Error(`chat_resource_invalid:${resource}`);
+  const resource = normalizeDeviceIdSegment(value);
+  if (!resource) throw new Error("chat_resource_invalid");
+  return resource;
 }
 function normalizeLogLevel(level, logger) {
   if (!logger) return "silent";
@@ -2317,7 +2307,6 @@ function decodeJsonBase64(value) {
 export {
   buildChatMessageMetadata,
   buildFormSubmissionMetadata,
-  chatResources,
   createChatClient,
   createDeviceId,
   createIndexDbStorageBackend,
