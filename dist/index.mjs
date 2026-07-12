@@ -26,6 +26,9 @@ var PUBSUB_NS = "http://jabber.org/protocol/pubsub";
 var XDATA_NS = "jabber:x:data";
 var DEFAULT_CONNECT_TIMEOUT_MS = 15e3;
 var DEFAULT_IQ_TIMEOUT_MS = 15e3;
+var OMEMO_IQ_TIMEOUT_MS = 5e3;
+var OMEMO_IQ_MAX_ATTEMPTS = 3;
+var OMEMO_IQ_RETRY_DELAY_MS = 250;
 var DEFAULT_TYPING_AUTO_PAUSE_MS = 1e4;
 var DEFAULT_OMEMO_STATE_KEY_PREFIX = "chat_sdk_omemo_state";
 var DEFAULT_XMPP_WEBSOCKET_PATH = "/chat/websocket";
@@ -1111,6 +1114,30 @@ function createOmemoEncryption(options = {}) {
   let publishedBareJid = null;
   let identityPublishPromise = null;
   const stateKey = (bareJid) => `${stateKeyPrefix}:${bareJid}`;
+  const sendOmemoIq = async (context, input, operation) => {
+    let lastError;
+    for (let attempt = 1; attempt <= OMEMO_IQ_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        return await context.sendIq({
+          ...input,
+          timeoutMs: OMEMO_IQ_TIMEOUT_MS
+        });
+      } catch (error) {
+        lastError = error;
+        if (attempt === OMEMO_IQ_MAX_ATTEMPTS) break;
+        context.logger?.warn?.("chat_omemo_iq_retry", {
+          operation,
+          attempt,
+          to: input.to,
+          error
+        });
+        await new Promise((resolve) => {
+          setTimeout(resolve, OMEMO_IQ_RETRY_DELAY_MS * attempt);
+        });
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(`chat_omemo_iq_failed:${operation}`);
+  };
   const loadOrCreateState = async (bareJid) => {
     if (cachedState?.bareJid === bareJid) return cachedState;
     const raw = await storage.getItem(stateKey(bareJid));
@@ -1145,15 +1172,19 @@ function createOmemoEncryption(options = {}) {
     });
     let stanza;
     try {
-      stanza = await context.sendIq({
-        type: "get",
-        to: bareJid,
-        payload: xml(
-          "pubsub",
-          { xmlns: PUBSUB_NS },
-          xml("items", { node: OMEMO_DEVICELIST_NODE, max_items: "1" })
-        )
-      });
+      stanza = await sendOmemoIq(
+        context,
+        {
+          type: "get",
+          to: bareJid,
+          payload: xml(
+            "pubsub",
+            { xmlns: PUBSUB_NS },
+            xml("items", { node: OMEMO_DEVICELIST_NODE, max_items: "1" })
+          )
+        },
+        "discover-devices"
+      );
     } catch (error) {
       const message = String(error instanceof Error ? error.message : error);
       if (message.includes("item-not-found") || message.includes("item_not_found")) {
@@ -1194,15 +1225,19 @@ function createOmemoEncryption(options = {}) {
     const bundleNode = `${OMEMO_BUNDLE_NODE_PREFIX}${deviceId}`;
     let stanza;
     try {
-      stanza = await context.sendIq({
-        type: "get",
-        to: bareJid,
-        payload: xml(
-          "pubsub",
-          { xmlns: PUBSUB_NS },
-          xml("items", { node: bundleNode, max_items: "1" })
-        )
-      });
+      stanza = await sendOmemoIq(
+        context,
+        {
+          type: "get",
+          to: bareJid,
+          payload: xml(
+            "pubsub",
+            { xmlns: PUBSUB_NS },
+            xml("items", { node: bundleNode, max_items: "1" })
+          )
+        },
+        "fetch-identity"
+      );
     } catch (error) {
       const message = String(error instanceof Error ? error.message : error);
       if (message.includes("item-not-found") || message.includes("item_not_found")) {
@@ -1241,48 +1276,56 @@ function createOmemoEncryption(options = {}) {
         xml("field", { var: "pubsub#persist_items" }, xml("value", {}, "true"))
       )
     );
-    await context.sendIq({
-      type: "set",
-      payload: xml(
-        "pubsub",
-        { xmlns: PUBSUB_NS },
-        xml(
-          "publish",
-          { node: OMEMO_DEVICELIST_NODE },
+    await sendOmemoIq(
+      context,
+      {
+        type: "set",
+        payload: xml(
+          "pubsub",
+          { xmlns: PUBSUB_NS },
           xml(
-            "item",
-            { id: "current" },
+            "publish",
+            { node: OMEMO_DEVICELIST_NODE },
             xml(
-              "list",
-              { xmlns: OMEMO_NS },
-              ...finalDeviceIds.map((deviceId) => xml("device", { id: String(deviceId) }))
+              "item",
+              { id: "current" },
+              xml(
+                "list",
+                { xmlns: OMEMO_NS },
+                ...finalDeviceIds.map((deviceId) => xml("device", { id: String(deviceId) }))
+              )
             )
-          )
-        ),
-        publishOptions
-      )
-    });
-    await context.sendIq({
-      type: "set",
-      payload: xml(
-        "pubsub",
-        { xmlns: PUBSUB_NS },
-        xml(
-          "publish",
-          { node: `${OMEMO_BUNDLE_NODE_PREFIX}${state.omemoDeviceId}` },
+          ),
+          publishOptions
+        )
+      },
+      "publish-devices"
+    );
+    await sendOmemoIq(
+      context,
+      {
+        type: "set",
+        payload: xml(
+          "pubsub",
+          { xmlns: PUBSUB_NS },
           xml(
-            "item",
-            { id: "current" },
+            "publish",
+            { node: `${OMEMO_BUNDLE_NODE_PREFIX}${state.omemoDeviceId}` },
             xml(
-              "bundle",
-              { xmlns: OMEMO_NS },
-              xml("identityKey", {}, state.identityPublicKey)
+              "item",
+              { id: "current" },
+              xml(
+                "bundle",
+                { xmlns: OMEMO_NS },
+                xml("identityKey", {}, state.identityPublicKey)
+              )
             )
-          )
-        ),
-        publishOptions
-      )
-    });
+          ),
+          publishOptions
+        )
+      },
+      "publish-identity"
+    );
     publishedBareJid = bareJid;
     context.logger?.debug?.("chat_omemo_identity_published", {
       bareJid,
