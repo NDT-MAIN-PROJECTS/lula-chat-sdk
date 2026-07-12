@@ -21,6 +21,8 @@ export type ChatDeliveryStatus = "delivered" | "read";
 
 export type DeviceId = string;
 
+export type ChatTargetScope = "user" | "resource";
+
 type ChatMessageType = "CHAT_MESSAGE" | "FORM_SUBMISSION";
 
 export type ChatMessageMetadata = Record<string, unknown> & {
@@ -263,6 +265,8 @@ export type ChatMessageInput = {
   attachments?: ChatAttachment[];
   roomId?: string;
   targetRoomId?: string;
+  /** Typed chat APIs default to bare user JIDs. Use resource only for device control traffic. */
+  targetScope?: ChatTargetScope;
   /** Any additional metadata for the text message. */
   metadata?: Record<string, unknown>;
   id?: string;
@@ -341,6 +345,7 @@ export type ChatAttachmentMessageInput = Omit<
 
 export type ChatTypingInput = {
   roomId: string;
+  targetScope?: ChatTargetScope;
   peerDeviceId?: DeviceId;
   peerDeviceIds?: DeviceId[];
   toDeviceId?: DeviceId;
@@ -353,6 +358,7 @@ export type ChatTypingInput = {
 export type ChatDisplayedInput = {
   roomId: string;
   messageId: string;
+  targetScope?: ChatTargetScope;
   peerDeviceId?: DeviceId;
   peerDeviceIds?: DeviceId[];
   toDeviceId?: DeviceId;
@@ -846,11 +852,14 @@ class LulaChatClient implements ChatClient {
       displayName: this.config.displayName,
     });
     const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
-    return this.sendMessage({
-      ...input,
-      metadata,
-      targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId,
-    });
+    return this.sendMessageInput(
+      {
+        ...input,
+        metadata,
+        targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId,
+      },
+      "user",
+    );
   }
 
   public async sendFormSubmission(input: ChatFormSubmissionInput): Promise<string> {
@@ -859,12 +868,15 @@ class LulaChatClient implements ChatClient {
       displayName: this.config.displayName,
     });
     const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
-    return this.sendMessage({
-      ...pickMessageTargetInput(input),
-      body: JSON.stringify(input.payload, null, input.pretty ? 2 : undefined),
-      metadata,
-      targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId,
-    });
+    return this.sendMessageInput(
+      {
+        ...pickMessageTargetInput(input),
+        body: JSON.stringify(input.payload, null, input.pretty ? 2 : undefined),
+        metadata,
+        targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId,
+      },
+      "user",
+    );
   }
 
   public async uploadAttachment(
@@ -913,14 +925,17 @@ class LulaChatClient implements ChatClient {
       displayName: this.config.displayName,
     });
     const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
-    return this.sendMessage({
-      ...input,
-      roomId,
-      body: input.body ?? "",
-      attachments: [uploaded],
-      metadata,
-      targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? roomId,
-    });
+    return this.sendMessageInput(
+      {
+        ...input,
+        roomId,
+        body: input.body ?? "",
+        attachments: [uploaded],
+        metadata,
+        targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? roomId,
+      },
+      "user",
+    );
   }
 
   public async sendMessage(
@@ -932,6 +947,13 @@ class LulaChatClient implements ChatClient {
       typeof inputOrRoomId === "string"
         ? { ...(options ?? {}), roomId: inputOrRoomId, body: body ?? "" }
         : inputOrRoomId;
+    return this.sendMessageInput(input, "resource");
+  }
+
+  private async sendMessageInput(
+    input: ChatMessageInput,
+    defaultTargetScope: ChatTargetScope,
+  ): Promise<string> {
     const messageBody = input.body ?? "";
     const attachments = normalizeAttachmentPayload(input.attachments);
     if (!messageBody.trim() && !attachments?.length) throw new Error("chat_body_required");
@@ -942,15 +964,19 @@ class LulaChatClient implements ChatClient {
     const id = input.id || generateMessageId();
     const roomId = input.roomId?.trim();
     const targetRoomId = input.targetRoomId?.trim() || roomId;
+    const targetScope = input.targetScope ?? defaultTargetScope;
     const targetDeviceIds = await this.resolveRoomTargets({
       roomId: targetRoomId,
       explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope,
     });
     this.log("debug", "chat_message_send_started", {
       id,
       roomId,
       targetRoomId,
+      targetScope,
       targetCount: targetDeviceIds.length,
+      targetDeviceIds,
       hasAttachments: Boolean(attachments?.length),
       messageType: metadata.messageType,
     });
@@ -979,6 +1005,7 @@ class LulaChatClient implements ChatClient {
       id,
       roomId,
       targetRoomId,
+      targetScope,
       targetCount: targetDeviceIds.length,
       messageType: metadata.messageType,
     });
@@ -1000,14 +1027,17 @@ class LulaChatClient implements ChatClient {
     const roomId = input.roomId.trim();
     if (!roomId) throw new Error("chat_room_id_required");
     const isTyping = input.isTyping ?? true;
+    const targetScope = input.targetScope ?? "user";
     const targetDeviceIds = await this.resolveRoomTargets({
       roomId,
       explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope,
     });
 
     this.log("debug", "chat_typing_send_started", {
       roomId,
       isTyping,
+      targetScope,
       targetCount: targetDeviceIds.length,
     });
     this.rememberRoomPeers(roomId, targetDeviceIds);
@@ -1048,14 +1078,17 @@ class LulaChatClient implements ChatClient {
     const roomId = input.roomId.trim();
     if (!roomId) throw new Error("chat_room_id_required");
     if (!input.messageId.trim()) throw new Error("chat_message_id_required");
+    const targetScope = input.targetScope ?? "user";
     const targetDeviceIds = await this.resolveRoomTargets({
       roomId,
       explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope,
     });
 
     this.log("debug", "chat_read_marker_send_started", {
       roomId,
       messageId: input.messageId,
+      targetScope,
       targetCount: targetDeviceIds.length,
     });
     this.rememberRoomPeers(roomId, targetDeviceIds);
@@ -1595,22 +1628,24 @@ class LulaChatClient implements ChatClient {
   private async resolveRoomTargets(input: {
     roomId?: string;
     explicitDeviceIds?: string[];
+    targetScope: ChatTargetScope;
   }): Promise<string[]> {
-    const explicit = normalizeTransportAddressList(input.explicitDeviceIds ?? []);
+    const explicit = normalizeTargetAddressList(
+      input.explicitDeviceIds ?? [],
+      input.targetScope,
+    );
     if (input.roomId) this.rememberRoomPeers(input.roomId, explicit);
     const resolverDeviceIds = input.roomId ? await this.getPeerDeviceIds(input.roomId) : [];
     const cachedDeviceIds = input.roomId ? this.getCachedRoomPeers(input.roomId) : [];
     const ownTransportAddress = normalizeTransportAddress(this.getDeviceId());
     const ownBareAddress = this.getBareDeviceId();
-    const targets = normalizeTransportAddressList([
-      ...explicit,
-      ...resolverDeviceIds,
-      ...cachedDeviceIds,
-    ]).filter(
-      (target) => !isOwnTransportTarget(target, ownTransportAddress, ownBareAddress),
-    );
+    const targets = normalizeTargetAddressList(
+      [...explicit, ...resolverDeviceIds, ...cachedDeviceIds],
+      input.targetScope,
+    ).filter((target) => !isOwnTransportTarget(target, ownTransportAddress, ownBareAddress));
     this.log("debug", "chat_room_targets_resolved", {
       roomId: input.roomId,
+      targetScope: input.targetScope,
       explicitCount: explicit.length,
       resolverCount: resolverDeviceIds.length,
       cachedCount: cachedDeviceIds.length,
@@ -1904,6 +1939,7 @@ export function createOmemoEncryption(
   const stateKeyPrefix = options.stateKeyPrefix ?? DEFAULT_OMEMO_STATE_KEY_PREFIX;
   let cachedState: OmemoState | null = null;
   let publishedBareJid: string | null = null;
+  let identityPublishPromise: Promise<void> | null = null;
 
   const stateKey = (bareJid: string) => `${stateKeyPrefix}:${bareJid}`;
 
@@ -1937,8 +1973,16 @@ export function createOmemoEncryption(
 
   const fetchDeviceIds = async (
     context: ChatEncryptionContext,
-    bareJid: string,
+    address: string,
   ): Promise<number[]> => {
+    const bareJid = normalizeBareDeviceId(address);
+    if (!bareJid) throw new Error("xmpp_omemo_bare_jid_required");
+
+    context.logger?.debug?.("chat_omemo_device_discovery_started", {
+      bareJid,
+      node: OMEMO_DEVICELIST_NODE,
+    });
+
     let stanza: XmppElementLike;
     try {
       stanza = await context.sendIq({
@@ -1953,22 +1997,42 @@ export function createOmemoEncryption(
     } catch (error) {
       const message = String(error instanceof Error ? error.message : error);
       if (message.includes("item-not-found") || message.includes("item_not_found")) {
+        context.logger?.debug?.("chat_omemo_devices_discovered", {
+          bareJid,
+          deviceIds: [],
+        });
         return [];
       }
+      context.logger?.warn?.("chat_omemo_device_discovery_failed", {
+        bareJid,
+        error,
+      });
       throw error;
     }
 
-    const raw = toRawXmlString(stanza);
     const deviceIds = new Set<number>();
-    const deviceRegex = /<device\b[^>]*id=(['"])(\d+)\1/g;
-    let match: RegExpExecArray | null = null;
-    while ((match = deviceRegex.exec(raw)) !== null) {
-      const parsed = Number(match[2]);
-      if (Number.isFinite(parsed) && parsed > 0) {
-        deviceIds.add(Math.floor(parsed));
+    const pubsub =
+      stanza.getChild?.("pubsub", PUBSUB_NS) ?? stanza.getChild?.("pubsub");
+    const items = pubsub?.getChild?.("items");
+    const itemElements = items?.getChildren?.("item") ?? [];
+    for (const item of itemElements) {
+      const list =
+        item.getChild?.("list", OMEMO_NS) ?? item.getChild?.("list");
+      const devices = list?.getChildren?.("device") ?? [];
+      for (const device of devices) {
+        const parsed = Number(device.attrs?.id ?? "0");
+        if (Number.isSafeInteger(parsed) && parsed > 0) {
+          deviceIds.add(parsed);
+        }
       }
     }
-    return Array.from(deviceIds);
+
+    const discovered = Array.from(deviceIds);
+    context.logger?.debug?.("chat_omemo_devices_discovered", {
+      bareJid,
+      deviceIds: discovered,
+    });
+    return discovered;
   };
 
   const fetchIdentityKey = async (
@@ -2077,6 +2141,31 @@ export function createOmemoEncryption(
     });
 
     publishedBareJid = bareJid;
+    context.logger?.debug?.("chat_omemo_identity_published", {
+      bareJid,
+      deviceId: state.omemoDeviceId,
+      deviceIds: finalDeviceIds,
+    });
+  };
+
+  const startIdentityPublish = (
+    context: ChatEncryptionContext,
+  ): Promise<void> => {
+    const bareJid = context.getBareDeviceId();
+    if (!bareJid || publishedBareJid === bareJid) return Promise.resolve();
+    if (identityPublishPromise) return identityPublishPromise;
+
+    identityPublishPromise = publishIdentity(context)
+      .catch((error) => {
+        context.logger?.warn?.("chat_omemo_identity_publish_failed", {
+          bareJid,
+          error,
+        });
+      })
+      .finally(() => {
+        identityPublishPromise = null;
+      });
+    return identityPublishPromise;
   };
 
   const establishPeerSessions = async (
@@ -2090,7 +2179,8 @@ export function createOmemoEncryption(
 
     const state = await loadOrCreateState(bareJid);
     const ownPrivateKey = base64ToBytes(state.identityPrivateKey);
-    const peerDeviceIds = await fetchDeviceIds(context, normalizeBareDeviceId(toDeviceId));
+    const peerBareJid = normalizeBareDeviceId(toDeviceId);
+    const peerDeviceIds = await fetchDeviceIds(context, peerBareJid);
     if (!peerDeviceIds.length) {
       throw new Error("xmpp_omemo_peer_device_not_found");
     }
@@ -2100,7 +2190,7 @@ export function createOmemoEncryption(
       try {
         const peerPublicKey = await fetchIdentityKey(
           context,
-          normalizeBareDeviceId(toDeviceId),
+          peerBareJid,
           peerDeviceId,
         );
         sessions.push({
@@ -2123,7 +2213,7 @@ export function createOmemoEncryption(
     onConnect: async (context) => {
       const bareJid = context.getBareDeviceId();
       if (!bareJid || publishedBareJid === bareJid) return;
-      await publishIdentity(context);
+      await startIdentityPublish(context);
     },
     encrypt: async (input, context) => {
       const bareJid = context.getBareDeviceId();
@@ -2132,11 +2222,17 @@ export function createOmemoEncryption(
       }
 
       if (publishedBareJid !== bareJid) {
-        await publishIdentity(context);
+        void startIdentityPublish(context);
       }
 
       const state = await loadOrCreateState(bareJid);
-      const sessions = await establishPeerSessions(context, input.toDeviceId);
+      const recipientBareJid = normalizeBareDeviceId(input.toDeviceId);
+      const recipientSessions = await establishPeerSessions(context, recipientBareJid);
+      const senderSessions =
+        recipientBareJid === bareJid
+          ? []
+          : await establishPeerSessions(context, bareJid);
+      const sessions = [...recipientSessions, ...senderSessions];
       const iv = nobleRandomBytes(12);
       const contentKey = nobleRandomBytes(OMEMO_AES_KEY_BYTES);
       const plaintext = new TextEncoder().encode(
@@ -2593,6 +2689,15 @@ function normalizeTransportAddressList(values: Array<string | undefined>): Devic
   return Array.from(new Set(normalized));
 }
 
+function normalizeTargetAddressList(
+  values: Array<string | undefined>,
+  targetScope: ChatTargetScope,
+): DeviceId[] {
+  return targetScope === "user"
+    ? normalizeDeviceIdList(values)
+    : normalizeTransportAddressList(values);
+}
+
 function isOwnTransportTarget(
   target: string,
   ownTransportAddress?: string,
@@ -2621,6 +2726,7 @@ function pickMessageTargetInput(input: ChatFormSubmissionInput): Omit<ChatMessag
     attachments: input.attachments,
     roomId: input.roomId,
     targetRoomId: input.targetRoomId,
+    targetScope: input.targetScope,
     id: input.id,
     requestReceipt: input.requestReceipt,
   };

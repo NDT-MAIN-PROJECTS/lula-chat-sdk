@@ -217,18 +217,20 @@ const chatClient = init({
 });
 ```
 
-`createRoomDirectory()` reads `roomId`, `peerDeviceId`, `peerDeviceIds`, `deviceId`, `deviceIds`, and `userMetadata[].deviceIds` from your room response. It can turn short device tokens into full transport addresses with `xmppDomain` and each room user id. It uses the current user metadata entry to add your linked devices into room fanout and leaves the current device out at send time.
+`createRoomDirectory()` reads `roomId`, `peerDeviceId`, `peerDeviceIds`, `deviceId`, `deviceIds`, and `userMetadata[].deviceIds` from your room response. It can turn short device tokens into transport addresses with `xmppDomain` and each room user id. Typed chat APIs collapse those candidates to one bare JID per user.
 
 `resolveRoomDeviceIds` still works as a fallback room fanout provider. New code should prefer `roomDirectory`.
 
-The SDK client exposes `getPeerDeviceIds(roomId)`. That gives app code one SDK method to ask for the current fanout targets, no matter if they came from cache, incoming messages, or a configured provider.
+The SDK client exposes `getPeerDeviceIds(roomId)`. That gives app code one method to inspect candidates from cache, incoming messages, or a configured provider.
 
 ## User Resources and Message Carbons
 
 The SDK uses one XMPP account per app user and the device id as the XMPP resource:
 `i.<user>@domain/<deviceId>`.
 
-Message Carbons (XEP-0280) are enabled after every successful connection, so ejabberd can copy direct-chat messages across the user's active resources. Room-directory peers should resolve to bare user JIDs such as `i.<peer>@domain`; full resource JIDs can still be passed explicitly with `toDeviceId` / `toDeviceIds` for device-specific sync or control messages.
+The SDK enables Message Carbons (XEP-0280) for its resource after each successful connection. The XMPP server owns copy generation and routing. The SDK unwraps sent and received carbon stanzas. Room-directory peers should resolve to bare user JIDs such as `i.<peer>@domain`. Use `targetScope: "resource"` with a full JID only for device sync or control messages.
+
+`sendChatMessage`, `sendAttachment`, `sendFormSubmission`, `sendTyping`, and `markRead` use `targetScope: "user"` by default. They strip `/resource` from explicit, cached, and room-directory targets before sending. Set `targetScope: "resource"` only for device-specific control traffic. The low-level `sendMessage` API keeps resource targeting as its default.
 
 ```ts
 const roomDirectory = createRoomDirectory({
@@ -331,6 +333,14 @@ The SDK chooses `onChatMessage()` or `onFormSubmission()` from its own metadata 
 
 If you want chat messages encrypted, use the built-in OMEMO helper. Typing indicators, delivery receipts, and read markers stay as normal chat control stanzas.
 
+The OMEMO helper discovers encryption devices through XMPP PEP/PubSub. It
+normalizes each account address to a bare JID, reads the
+`eu.siacs.conversations.axolotl.devicelist` node, and fetches the published
+identity bundle for each numeric OMEMO device id. It performs this discovery
+for the recipient and for the sender's own account so carbon copies can be
+decrypted by the sender's other clients. Applications do not provide XMPP
+resources or device fanout lists for normal chat messages.
+
 ```ts
 import { createOmemoEncryption, init, storageBackends } from "@hubnet-systems/chat-sdk";
 
@@ -396,4 +406,6 @@ const chatClient = init({
 });
 ```
 
-The SDK owns connection state, fanout, listeners, receipts, typing states, and message IDs.
+The SDK owns connection state, OMEMO device discovery, listeners, receipts,
+typing states, and message IDs. The XMPP server owns resource routing and
+Message Carbon delivery.

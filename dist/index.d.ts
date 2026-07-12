@@ -3,6 +3,7 @@ export type Unsubscribe = () => void;
 export type ChatStatus = "idle" | "connecting" | "online" | "offline" | "stopping" | "error";
 export type ChatDeliveryStatus = "delivered" | "read";
 export type DeviceId = string;
+export type ChatTargetScope = "user" | "resource";
 export type ChatMessageMetadata = Record<string, unknown> & {
     messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION";
 };
@@ -186,6 +187,8 @@ export type ChatMessageInput = {
     attachments?: ChatAttachment[];
     roomId?: string;
     targetRoomId?: string;
+    /** Typed chat APIs default to bare user JIDs. Use resource only for device control traffic. */
+    targetScope?: ChatTargetScope;
     /** Any additional metadata for the text message. */
     metadata?: Record<string, unknown>;
     id?: string;
@@ -252,6 +255,7 @@ export type ChatAttachmentMessageInput = Omit<ChatTextMessageInput, "body" | "at
 };
 export type ChatTypingInput = {
     roomId: string;
+    targetScope?: ChatTargetScope;
     peerDeviceId?: DeviceId;
     peerDeviceIds?: DeviceId[];
     toDeviceId?: DeviceId;
@@ -263,6 +267,7 @@ export type ChatTypingInput = {
 export type ChatDisplayedInput = {
     roomId: string;
     messageId: string;
+    targetScope?: ChatTargetScope;
     peerDeviceId?: DeviceId;
     peerDeviceIds?: DeviceId[];
     toDeviceId?: DeviceId;

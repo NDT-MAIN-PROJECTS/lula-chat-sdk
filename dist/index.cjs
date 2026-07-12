@@ -264,11 +264,14 @@ var LulaChatClient = class {
       displayName: this.config.displayName
     });
     const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
-    return this.sendMessage({
-      ...input,
-      metadata,
-      targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId
-    });
+    return this.sendMessageInput(
+      {
+        ...input,
+        metadata,
+        targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId
+      },
+      "user"
+    );
   }
   async sendFormSubmission(input) {
     const metadata = buildFormSubmissionMetadata({
@@ -276,12 +279,15 @@ var LulaChatClient = class {
       displayName: this.config.displayName
     });
     const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
-    return this.sendMessage({
-      ...pickMessageTargetInput(input),
-      body: JSON.stringify(input.payload, null, input.pretty ? 2 : void 0),
-      metadata,
-      targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId
-    });
+    return this.sendMessageInput(
+      {
+        ...pickMessageTargetInput(input),
+        body: JSON.stringify(input.payload, null, input.pretty ? 2 : void 0),
+        metadata,
+        targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId
+      },
+      "user"
+    );
   }
   async uploadAttachment(inputOrRoomId, attachment) {
     const input = typeof inputOrRoomId === "string" ? { roomId: inputOrRoomId, attachment } : inputOrRoomId;
@@ -315,17 +321,23 @@ var LulaChatClient = class {
       displayName: this.config.displayName
     });
     const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
-    return this.sendMessage({
-      ...input,
-      roomId,
-      body: input.body ?? "",
-      attachments: [uploaded],
-      metadata,
-      targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? roomId
-    });
+    return this.sendMessageInput(
+      {
+        ...input,
+        roomId,
+        body: input.body ?? "",
+        attachments: [uploaded],
+        metadata,
+        targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? roomId
+      },
+      "user"
+    );
   }
   async sendMessage(inputOrRoomId, body, options) {
     const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, body: body ?? "" } : inputOrRoomId;
+    return this.sendMessageInput(input, "resource");
+  }
+  async sendMessageInput(input, defaultTargetScope) {
     const messageBody = input.body ?? "";
     const attachments = normalizeAttachmentPayload(input.attachments);
     if (!messageBody.trim() && !attachments?.length) throw new Error("chat_body_required");
@@ -335,15 +347,19 @@ var LulaChatClient = class {
     const id = input.id || generateMessageId();
     const roomId = input.roomId?.trim();
     const targetRoomId = input.targetRoomId?.trim() || roomId;
+    const targetScope = input.targetScope ?? defaultTargetScope;
     const targetDeviceIds = await this.resolveRoomTargets({
       roomId: targetRoomId,
-      explicitDeviceIds: collectTargetDeviceIds(input)
+      explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope
     });
     this.log("debug", "chat_message_send_started", {
       id,
       roomId,
       targetRoomId,
+      targetScope,
       targetCount: targetDeviceIds.length,
+      targetDeviceIds,
       hasAttachments: Boolean(attachments?.length),
       messageType: metadata.messageType
     });
@@ -369,6 +385,7 @@ var LulaChatClient = class {
       id,
       roomId,
       targetRoomId,
+      targetScope,
       targetCount: targetDeviceIds.length,
       messageType: metadata.messageType
     });
@@ -383,13 +400,16 @@ var LulaChatClient = class {
     const roomId = input.roomId.trim();
     if (!roomId) throw new Error("chat_room_id_required");
     const isTyping = input.isTyping ?? true;
+    const targetScope = input.targetScope ?? "user";
     const targetDeviceIds = await this.resolveRoomTargets({
       roomId,
-      explicitDeviceIds: collectTargetDeviceIds(input)
+      explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope
     });
     this.log("debug", "chat_typing_send_started", {
       roomId,
       isTyping,
+      targetScope,
       targetCount: targetDeviceIds.length
     });
     this.rememberRoomPeers(roomId, targetDeviceIds);
@@ -422,13 +442,16 @@ var LulaChatClient = class {
     const roomId = input.roomId.trim();
     if (!roomId) throw new Error("chat_room_id_required");
     if (!input.messageId.trim()) throw new Error("chat_message_id_required");
+    const targetScope = input.targetScope ?? "user";
     const targetDeviceIds = await this.resolveRoomTargets({
       roomId,
-      explicitDeviceIds: collectTargetDeviceIds(input)
+      explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope
     });
     this.log("debug", "chat_read_marker_send_started", {
       roomId,
       messageId: input.messageId,
+      targetScope,
       targetCount: targetDeviceIds.length
     });
     this.rememberRoomPeers(roomId, targetDeviceIds);
@@ -898,21 +921,22 @@ var LulaChatClient = class {
     return { ...room, roomId: normalizedRoomId };
   }
   async resolveRoomTargets(input) {
-    const explicit = normalizeTransportAddressList(input.explicitDeviceIds ?? []);
+    const explicit = normalizeTargetAddressList(
+      input.explicitDeviceIds ?? [],
+      input.targetScope
+    );
     if (input.roomId) this.rememberRoomPeers(input.roomId, explicit);
     const resolverDeviceIds = input.roomId ? await this.getPeerDeviceIds(input.roomId) : [];
     const cachedDeviceIds = input.roomId ? this.getCachedRoomPeers(input.roomId) : [];
     const ownTransportAddress = normalizeTransportAddress(this.getDeviceId());
     const ownBareAddress = this.getBareDeviceId();
-    const targets = normalizeTransportAddressList([
-      ...explicit,
-      ...resolverDeviceIds,
-      ...cachedDeviceIds
-    ]).filter(
-      (target) => !isOwnTransportTarget(target, ownTransportAddress, ownBareAddress)
-    );
+    const targets = normalizeTargetAddressList(
+      [...explicit, ...resolverDeviceIds, ...cachedDeviceIds],
+      input.targetScope
+    ).filter((target) => !isOwnTransportTarget(target, ownTransportAddress, ownBareAddress));
     this.log("debug", "chat_room_targets_resolved", {
       roomId: input.roomId,
+      targetScope: input.targetScope,
       explicitCount: explicit.length,
       resolverCount: resolverDeviceIds.length,
       cachedCount: cachedDeviceIds.length,
@@ -1136,6 +1160,7 @@ function createOmemoEncryption(options = {}) {
   const stateKeyPrefix = options.stateKeyPrefix ?? DEFAULT_OMEMO_STATE_KEY_PREFIX;
   let cachedState = null;
   let publishedBareJid = null;
+  let identityPublishPromise = null;
   const stateKey = (bareJid) => `${stateKeyPrefix}:${bareJid}`;
   const loadOrCreateState = async (bareJid) => {
     if (cachedState?.bareJid === bareJid) return cachedState;
@@ -1162,7 +1187,13 @@ function createOmemoEncryption(options = {}) {
     cachedState = nextState;
     return nextState;
   };
-  const fetchDeviceIds = async (context, bareJid) => {
+  const fetchDeviceIds = async (context, address) => {
+    const bareJid = normalizeBareDeviceId(address);
+    if (!bareJid) throw new Error("xmpp_omemo_bare_jid_required");
+    context.logger?.debug?.("chat_omemo_device_discovery_started", {
+      bareJid,
+      node: OMEMO_DEVICELIST_NODE
+    });
     let stanza;
     try {
       stanza = await context.sendIq({
@@ -1177,21 +1208,38 @@ function createOmemoEncryption(options = {}) {
     } catch (error) {
       const message = String(error instanceof Error ? error.message : error);
       if (message.includes("item-not-found") || message.includes("item_not_found")) {
+        context.logger?.debug?.("chat_omemo_devices_discovered", {
+          bareJid,
+          deviceIds: []
+        });
         return [];
       }
+      context.logger?.warn?.("chat_omemo_device_discovery_failed", {
+        bareJid,
+        error
+      });
       throw error;
     }
-    const raw = toRawXmlString(stanza);
     const deviceIds = /* @__PURE__ */ new Set();
-    const deviceRegex = /<device\b[^>]*id=(['"])(\d+)\1/g;
-    let match = null;
-    while ((match = deviceRegex.exec(raw)) !== null) {
-      const parsed = Number(match[2]);
-      if (Number.isFinite(parsed) && parsed > 0) {
-        deviceIds.add(Math.floor(parsed));
+    const pubsub = stanza.getChild?.("pubsub", PUBSUB_NS) ?? stanza.getChild?.("pubsub");
+    const items = pubsub?.getChild?.("items");
+    const itemElements = items?.getChildren?.("item") ?? [];
+    for (const item of itemElements) {
+      const list = item.getChild?.("list", OMEMO_NS) ?? item.getChild?.("list");
+      const devices = list?.getChildren?.("device") ?? [];
+      for (const device of devices) {
+        const parsed = Number(device.attrs?.id ?? "0");
+        if (Number.isSafeInteger(parsed) && parsed > 0) {
+          deviceIds.add(parsed);
+        }
       }
     }
-    return Array.from(deviceIds);
+    const discovered = Array.from(deviceIds);
+    context.logger?.debug?.("chat_omemo_devices_discovered", {
+      bareJid,
+      deviceIds: discovered
+    });
+    return discovered;
   };
   const fetchIdentityKey = async (context, bareJid, deviceId) => {
     const bundleNode = `${OMEMO_BUNDLE_NODE_PREFIX}${deviceId}`;
@@ -1287,6 +1335,25 @@ function createOmemoEncryption(options = {}) {
       )
     });
     publishedBareJid = bareJid;
+    context.logger?.debug?.("chat_omemo_identity_published", {
+      bareJid,
+      deviceId: state.omemoDeviceId,
+      deviceIds: finalDeviceIds
+    });
+  };
+  const startIdentityPublish = (context) => {
+    const bareJid = context.getBareDeviceId();
+    if (!bareJid || publishedBareJid === bareJid) return Promise.resolve();
+    if (identityPublishPromise) return identityPublishPromise;
+    identityPublishPromise = publishIdentity(context).catch((error) => {
+      context.logger?.warn?.("chat_omemo_identity_publish_failed", {
+        bareJid,
+        error
+      });
+    }).finally(() => {
+      identityPublishPromise = null;
+    });
+    return identityPublishPromise;
   };
   const establishPeerSessions = async (context, toDeviceId) => {
     const bareJid = context.getBareDeviceId();
@@ -1295,7 +1362,8 @@ function createOmemoEncryption(options = {}) {
     }
     const state = await loadOrCreateState(bareJid);
     const ownPrivateKey = base64ToBytes(state.identityPrivateKey);
-    const peerDeviceIds = await fetchDeviceIds(context, normalizeBareDeviceId(toDeviceId));
+    const peerBareJid = normalizeBareDeviceId(toDeviceId);
+    const peerDeviceIds = await fetchDeviceIds(context, peerBareJid);
     if (!peerDeviceIds.length) {
       throw new Error("xmpp_omemo_peer_device_not_found");
     }
@@ -1304,7 +1372,7 @@ function createOmemoEncryption(options = {}) {
       try {
         const peerPublicKey = await fetchIdentityKey(
           context,
-          normalizeBareDeviceId(toDeviceId),
+          peerBareJid,
           peerDeviceId
         );
         sessions.push({
@@ -1323,7 +1391,7 @@ function createOmemoEncryption(options = {}) {
     onConnect: async (context) => {
       const bareJid = context.getBareDeviceId();
       if (!bareJid || publishedBareJid === bareJid) return;
-      await publishIdentity(context);
+      await startIdentityPublish(context);
     },
     encrypt: async (input, context) => {
       const bareJid = context.getBareDeviceId();
@@ -1331,10 +1399,13 @@ function createOmemoEncryption(options = {}) {
         throw new Error("xmpp_omemo_state_missing");
       }
       if (publishedBareJid !== bareJid) {
-        await publishIdentity(context);
+        void startIdentityPublish(context);
       }
       const state = await loadOrCreateState(bareJid);
-      const sessions = await establishPeerSessions(context, input.toDeviceId);
+      const recipientBareJid = normalizeBareDeviceId(input.toDeviceId);
+      const recipientSessions = await establishPeerSessions(context, recipientBareJid);
+      const senderSessions = recipientBareJid === bareJid ? [] : await establishPeerSessions(context, bareJid);
+      const sessions = [...recipientSessions, ...senderSessions];
       const iv = (0, import_utils.randomBytes)(12);
       const contentKey = (0, import_utils.randomBytes)(OMEMO_AES_KEY_BYTES);
       const plaintext = new TextEncoder().encode(
@@ -1660,12 +1731,19 @@ function normalizeTransportAddressList(values) {
   const normalized = values.map((value) => normalizeTransportAddress(value)).filter((value) => value.length > 0);
   return Array.from(new Set(normalized));
 }
+function normalizeTargetAddressList(values, targetScope) {
+  return targetScope === "user" ? normalizeDeviceIdList(values) : normalizeTransportAddressList(values);
+}
 function isOwnTransportTarget(target, ownTransportAddress, ownBareAddress) {
   const normalized = normalizeTransportAddress(target);
   if (!normalized) return true;
   if (ownTransportAddress && normalized === ownTransportAddress) return true;
   if (ownBareAddress && normalized === ownBareAddress) return true;
   return false;
+}
+function normalizeDeviceIdList(values) {
+  const normalized = values.map((value) => normalizeBareDeviceId(value)).filter((value) => value.length > 0);
+  return Array.from(new Set(normalized));
 }
 function pickMessageTargetInput(input) {
   return {
@@ -1676,6 +1754,7 @@ function pickMessageTargetInput(input) {
     attachments: input.attachments,
     roomId: input.roomId,
     targetRoomId: input.targetRoomId,
+    targetScope: input.targetScope,
     id: input.id,
     requestReceipt: input.requestReceipt
   };
