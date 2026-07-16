@@ -32,6 +32,9 @@ const {
   onAttachmentMessage,
   onFormSubmission,
   sendChatMessage,
+  sendReply,
+  addReaction,
+  removeReaction,
   sendAttachment,
   sendFormSubmission,
   sendTyping,
@@ -77,6 +80,29 @@ await sendChatMessage({
     correlationId: "submission-123",
     displayName: "Agent",
   },
+});
+
+await sendReply({
+  roomId: room.roomId,
+  body: "That answers my question.",
+  replyTo: {
+    messageId: "message-123",
+    body: "Can you confirm this?",
+    senderId: "peer-user-id",
+    senderDisplayName: "Taylor",
+  },
+});
+
+await addReaction({
+  roomId: room.roomId,
+  targetMessageId: "message-123",
+  emoji: "👍",
+});
+
+await removeReaction({
+  roomId: room.roomId,
+  targetMessageId: "message-123",
+  emoji: "👍",
 });
 
 await sendFormSubmission({
@@ -179,6 +205,9 @@ message bodies.
 - `getDomain()` for the normalized chat domain.
 - `getUserId()` for the current app user id.
 - `sendChatMessage({ roomId, body })` to send human chat text.
+- `sendReply({ roomId, body, replyTo })` to send text with a typed reply reference.
+- `addReaction({ roomId, targetMessageId, emoji })` to add a reaction to a message.
+- `removeReaction({ roomId, targetMessageId, emoji })` to remove the current user's reaction.
 - `uploadAttachment(roomId, attachment)` to upload a file or image through your attachment adapter.
 - `sendAttachment(roomId, attachment)` to send an uploaded attachment into a room.
 - `sendFormSubmission({ roomId, payload })` to send a JSON form submission payload.
@@ -285,6 +314,36 @@ await chatClient.sendFormSubmission({
 ```
 
 `sendMessage()` remains available as the lower-level escape hatch, but new app code should use `sendChatMessage()` or `sendFormSubmission()`.
+
+## Replies and Reactions
+
+The SDK owns the wire contract for replies and reactions while preserving the metadata shape used by the existing mobile app.
+
+- Replies remain normal chat messages with a typed `metadata.replyTo` reference.
+- Reactions remain chat control messages with `chatInteractionType: "CHAT_REACTION"`, the target message id, emoji, actor id, and removal state in metadata.
+- `onChatMessage()` continues to emit raw messages, including reaction control messages, so existing consumers are unaffected.
+- Existing clients that already write or parse these metadata fields remain interoperable with the typed SDK methods.
+
+Use `buildChatInteractionTimeline()` when a UI wants projected messages with reply references and aggregated reactions. Reaction control messages are removed from the projected timeline but remain present in the raw event stream and persisted history.
+
+```ts
+import {
+  buildChatInteractionTimeline,
+  parseChatReactionEvent,
+  parseChatReplyReference,
+} from "@hubnet-systems/chat-sdk";
+
+const timeline = buildChatInteractionTimeline(rawMessages, currentUserId);
+
+for (const message of timeline) {
+  console.log(message.replyTo, message.reactions);
+}
+
+const reply = parseChatReplyReference(rawMessage.metadata);
+const reaction = parseChatReactionEvent(rawMessage);
+```
+
+This allows applications to migrate incrementally: sending can move to `sendReply()`, `addReaction()`, and `removeReaction()` before their local timeline projection is replaced.
 
 ## Attachments
 
