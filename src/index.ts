@@ -25,8 +25,39 @@ export type ChatTargetScope = "user" | "resource";
 
 type ChatMessageType = "CHAT_MESSAGE" | "FORM_SUBMISSION";
 
+export const CHAT_REACTION_INTERACTION_TYPE = "CHAT_REACTION" as const;
+export const CHAT_REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
+
+export type ChatReactionEmoji = string;
+
+const CHAT_REACTION_MAX_CODE_POINTS = 16;
+const CHAT_REACTION_EMOJI_PATTERN = /[\u2600-\u27BF\u{1F1E6}-\u{1FAFF}]/u;
+const CHAT_REACTION_EMOJI_SEQUENCE_PATTERN =
+  /^[\u200D\uFE0F\u2600-\u27BF\u{1F1E6}-\u{1FAFF}]+$/u;
+
+export type ChatReplyReference = {
+  messageId: string;
+  body: string;
+  senderId?: string;
+  senderDisplayName?: string;
+};
+
+export type ChatReactionEvent = {
+  targetMessageId: string;
+  emoji: ChatReactionEmoji;
+  actorId: string;
+  removed: boolean;
+};
+
 export type ChatMessageMetadata = Record<string, unknown> & {
   messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION";
+  canonicalEventId?: string;
+  replyTo?: ChatReplyReference;
+  chatInteractionType?: typeof CHAT_REACTION_INTERACTION_TYPE;
+  reactionToId?: string;
+  reactionEmoji?: ChatReactionEmoji;
+  reactionActorId?: string;
+  reactionRemoved?: boolean;
 };
 
 export type ChatLogLevel = "silent" | "error" | "warn" | "info" | "debug";
@@ -279,6 +310,163 @@ export type ChatTextMessageInput = Omit<ChatMessageInput, "metadata"> & {
   context?: ChatMessageContext;
 };
 
+export type ChatReplyMessageInput = ChatTextMessageInput & {
+  replyTo: ChatReplyReference;
+};
+
+export type ChatReactionMessageInput = Omit<ChatTextMessageInput, "body"> & {
+  targetMessageId: string;
+  emoji: ChatReactionEmoji;
+  actorId?: string;
+};
+
+export type ChatReactionSummary = {
+  emoji: ChatReactionEmoji;
+  count: number;
+  actorIds: string[];
+  reactedByCurrentUser: boolean;
+};
+
+export type ChatInteractiveMessage = ChatMessage & {
+  interactionId: string;
+  reactions: ChatReactionSummary[];
+  replyTo?: ChatReplyReference;
+};
+
+export type ChatInteractionMessageLike = {
+  id?: string;
+  metadata?: Record<string, unknown>;
+  senderId?: string;
+  fromUserId?: string;
+};
+
+export function normalizeInteractionActorId(value?: string | null): string {
+  const normalized = (String(value ?? "").trim().split("/")[0] ?? "").toLowerCase();
+  if (!normalized) return "";
+  const localpart = normalized.split("@")[0] ?? normalized;
+  const appUserMatch = /^i\.([^.]+)(?:\.d\..+)?$/.exec(localpart);
+  return appUserMatch?.[1] ?? normalized;
+}
+
+export function isChatReactionEmoji(value: unknown): value is ChatReactionEmoji {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim();
+  return (
+    normalized.length > 0 &&
+    !/\s/u.test(normalized) &&
+    Array.from(normalized).length <= CHAT_REACTION_MAX_CODE_POINTS &&
+    CHAT_REACTION_EMOJI_PATTERN.test(normalized) &&
+    CHAT_REACTION_EMOJI_SEQUENCE_PATTERN.test(normalized)
+  );
+}
+
+export function getMessageInteractionId(message: ChatInteractionMessageLike): string {
+  return firstString(message.metadata?.canonicalEventId, message.id) ?? "";
+}
+
+export function parseChatReplyReference(
+  metadata?: Record<string, unknown>,
+): ChatReplyReference | undefined {
+  if (!metadata || !isRecord(metadata.replyTo)) return undefined;
+  const messageId = firstString(metadata.replyTo.messageId);
+  const body = firstString(metadata.replyTo.body);
+  if (!messageId || !body) return undefined;
+  const senderId = firstString(metadata.replyTo.senderId);
+  const senderDisplayName = firstString(metadata.replyTo.senderDisplayName);
+  return {
+    messageId,
+    body,
+    ...(senderId ? { senderId } : {}),
+    ...(senderDisplayName ? { senderDisplayName } : {}),
+  };
+}
+
+export function parseChatReactionEvent(
+  message: ChatInteractionMessageLike,
+): ChatReactionEvent | undefined {
+  const metadata = message.metadata;
+  if (!metadata || metadata.chatInteractionType !== CHAT_REACTION_INTERACTION_TYPE) {
+    return undefined;
+  }
+  const targetMessageId = firstString(metadata.reactionToId);
+  const emoji =
+    typeof metadata.reactionEmoji === "string"
+      ? metadata.reactionEmoji.trim()
+      : metadata.reactionEmoji;
+  const actorId = normalizeInteractionActorId(
+    firstString(metadata.reactionActorId, message.senderId, message.fromUserId),
+  );
+  if (!targetMessageId || !isChatReactionEmoji(emoji) || !actorId) return undefined;
+  return {
+    targetMessageId,
+    emoji,
+    actorId,
+    removed: metadata.reactionRemoved === true,
+  };
+}
+
+export function isChatReactionControlMessage(message: ChatInteractionMessageLike): boolean {
+  return Boolean(parseChatReactionEvent(message));
+}
+
+export function buildChatInteractionTimeline(
+  messages: ChatMessage[],
+  currentActorId?: string | null,
+): ChatInteractiveMessage[] {
+  const reactionActorsByMessage = new Map<
+    string,
+    Map<ChatReactionEmoji, Set<string>>
+  >();
+
+  messages.forEach((message) => {
+    const event = parseChatReactionEvent(message);
+    if (!event) return;
+    const reactions =
+      reactionActorsByMessage.get(event.targetMessageId) ??
+      new Map<ChatReactionEmoji, Set<string>>();
+    const actors = reactions.get(event.emoji) ?? new Set<string>();
+    if (event.removed) actors.delete(event.actorId);
+    else actors.add(event.actorId);
+    reactions.set(event.emoji, actors);
+    reactionActorsByMessage.set(event.targetMessageId, reactions);
+  });
+
+  const normalizedCurrentActorId = normalizeInteractionActorId(currentActorId);
+  const timeline: ChatInteractiveMessage[] = [];
+  messages.forEach((message) => {
+    if (isChatReactionControlMessage(message)) return;
+    const interactionId = getMessageInteractionId(message);
+    const reactionActors = reactionActorsByMessage.get(interactionId);
+    const reactions: ChatReactionSummary[] = [];
+    const quickEmojis = CHAT_REACTION_EMOJIS as readonly string[];
+    const orderedEmojis: ChatReactionEmoji[] = [
+      ...CHAT_REACTION_EMOJIS.filter((emoji) => reactionActors?.has(emoji)),
+      ...Array.from(reactionActors?.keys() ?? []).filter(
+        (emoji) => !quickEmojis.includes(emoji),
+      ),
+    ];
+    orderedEmojis.forEach((emoji) => {
+      const actorIds = Array.from(reactionActors?.get(emoji) ?? []);
+      if (actorIds.length === 0) return;
+      reactions.push({
+        emoji,
+        count: actorIds.length,
+        actorIds,
+        reactedByCurrentUser:
+          Boolean(normalizedCurrentActorId) && actorIds.includes(normalizedCurrentActorId),
+      });
+    });
+    const replyTo = parseChatReplyReference(message.metadata);
+    timeline.push({
+      ...message,
+      interactionId,
+      reactions,
+      ...(replyTo ? { replyTo } : {}),
+    });
+  });
+  return timeline;
+}
+
 export type ChatTextMessage = ChatMessage & {
   context?: ChatMessageContext;
   providerDirectMessageRoomId: string;
@@ -502,6 +690,9 @@ export type ChatClient = {
       options?: Omit<ChatTextMessageInput, "roomId" | "body">,
     ): Promise<string>;
   };
+  sendReply: (message: ChatReplyMessageInput) => Promise<string>;
+  addReaction: (message: ChatReactionMessageInput) => Promise<string>;
+  removeReaction: (message: ChatReactionMessageInput) => Promise<string>;
   sendFormSubmission: (message: ChatFormSubmissionInput) => Promise<string>;
   uploadAttachment: {
     (roomId: string, attachment: ChatAttachmentUpload): Promise<ChatAttachment>;
@@ -863,6 +1054,44 @@ class LulaChatClient implements ChatClient {
       },
       "user",
     );
+  }
+
+  public sendReply(input: ChatReplyMessageInput): Promise<string> {
+    const { replyTo, metadata, ...message } = input;
+    return this.sendChatMessage({
+      ...message,
+      metadata: { ...(metadata ?? {}), replyTo },
+    });
+  }
+
+  public addReaction(input: ChatReactionMessageInput): Promise<string> {
+    return this.sendReaction(input, false);
+  }
+
+  public removeReaction(input: ChatReactionMessageInput): Promise<string> {
+    return this.sendReaction(input, true);
+  }
+
+  private sendReaction(input: ChatReactionMessageInput, removed: boolean): Promise<string> {
+    const { targetMessageId, emoji, actorId, metadata, ...message } = input;
+    const normalizedTargetMessageId = targetMessageId.trim();
+    const normalizedEmoji = emoji.trim();
+    if (!normalizedTargetMessageId) throw new Error("chat_reaction_target_required");
+    if (!isChatReactionEmoji(normalizedEmoji)) throw new Error("chat_reaction_emoji_invalid");
+    const normalizedActorId = normalizeInteractionActorId(actorId ?? this.config.userId);
+    if (!normalizedActorId) throw new Error("chat_reaction_actor_required");
+    return this.sendChatMessage({
+      ...message,
+      body: normalizedEmoji,
+      metadata: {
+        ...(metadata ?? {}),
+        chatInteractionType: CHAT_REACTION_INTERACTION_TYPE,
+        reactionToId: normalizedTargetMessageId,
+        reactionEmoji: normalizedEmoji,
+        reactionRemoved: removed,
+        reactionActorId: normalizedActorId,
+      },
+    });
   }
 
   public async sendFormSubmission(input: ChatFormSubmissionInput): Promise<string> {
