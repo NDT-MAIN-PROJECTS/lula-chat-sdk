@@ -531,6 +531,14 @@ export type ChatAttachmentMessageInput = Omit<
   body?: string;
 };
 
+export type ChatAttachmentsMessageInput = Omit<
+  ChatTextMessageInput,
+  "body" | "attachments"
+> & {
+  attachments: ChatAttachmentUpload[];
+  body?: string;
+};
+
 export type ChatTypingInput = {
   roomId: string;
   targetScope?: ChatTargetScope;
@@ -704,6 +712,14 @@ export type ChatClient = {
       roomId: string,
       attachment: ChatAttachmentUpload,
       options?: Omit<ChatAttachmentMessageInput, "roomId" | "attachment">,
+    ): Promise<string>;
+  };
+  sendAttachments: {
+    (message: ChatAttachmentsMessageInput): Promise<string>;
+    (
+      roomId: string,
+      attachments: ChatAttachmentUpload[],
+      options?: Omit<ChatAttachmentsMessageInput, "roomId" | "attachments">,
     ): Promise<string>;
   };
   /**
@@ -1142,27 +1158,61 @@ class LulaChatClient implements ChatClient {
       typeof inputOrRoomId === "string"
         ? { ...(options ?? {}), roomId: inputOrRoomId, attachment: attachment as ChatAttachmentUpload }
         : inputOrRoomId;
+    const { attachment: attachmentUpload, ...message } = input;
+    return this.sendAttachments({
+      ...message,
+      attachments: [attachmentUpload],
+    });
+  }
+
+  public async sendAttachments(
+    inputOrRoomId: ChatAttachmentsMessageInput | string,
+    attachments?: ChatAttachmentUpload[],
+    options?: Omit<ChatAttachmentsMessageInput, "roomId" | "attachments">,
+  ): Promise<string> {
+    const input =
+      typeof inputOrRoomId === "string"
+        ? { ...(options ?? {}), roomId: inputOrRoomId, attachments: attachments ?? [] }
+        : inputOrRoomId;
     const roomId = input.roomId?.trim();
     if (!roomId) throw new Error("chat_room_id_required");
-    const uploaded = await this.uploadAttachment({ roomId, attachment: input.attachment });
+    if (!Array.isArray(input.attachments) || input.attachments.length === 0) {
+      throw new Error("chat_attachments_required");
+    }
+
+    const uploadedAttachments: ChatAttachment[] = [];
+    for (const attachmentUpload of input.attachments) {
+      if (!attachmentUpload) throw new Error("chat_attachment_required");
+      uploadedAttachments.push(
+        await this.uploadAttachment({ roomId, attachment: attachmentUpload }),
+      );
+    }
+
+    const firstAttachment = uploadedAttachments[0];
     const metadata = buildChatMessageMetadata({
       ...input,
       roomId,
       metadata: {
         ...(input.metadata ?? {}),
         attachment: true,
-        ...(uploaded.mimeType ? { mimeType: uploaded.mimeType } : {}),
-        ...(typeof uploaded.size === "number" ? { size: uploaded.size } : {}),
+        attachmentCount: uploadedAttachments.length,
+        ...(uploadedAttachments.length === 1 && firstAttachment?.mimeType
+          ? { mimeType: firstAttachment.mimeType }
+          : {}),
+        ...(uploadedAttachments.length === 1 && typeof firstAttachment?.size === "number"
+          ? { size: firstAttachment.size }
+          : {}),
       },
       displayName: this.config.displayName,
     });
     const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
+    const { attachments: _attachmentUploads, ...message } = input;
     return this.sendMessageInput(
       {
-        ...input,
+        ...message,
         roomId,
         body: input.body ?? "",
-        attachments: [uploaded],
+        attachments: uploadedAttachments,
         metadata,
         targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? roomId,
       },
