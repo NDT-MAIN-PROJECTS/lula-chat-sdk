@@ -36,6 +36,7 @@ const {
   addReaction,
   removeReaction,
   sendAttachment,
+  sendAttachments,
   sendFormSubmission,
   sendTyping,
   markRead,
@@ -125,6 +126,25 @@ await sendAttachment(room.roomId, {
   size: 1024,
 });
 
+await sendAttachments(
+  room.roomId,
+  [
+    {
+      uri: "file:///tmp/front.jpg",
+      name: "front.jpg",
+      mimeType: "image/jpeg",
+    },
+    {
+      uri: "file:///tmp/back.jpg",
+      name: "back.jpg",
+      mimeType: "image/jpeg",
+    },
+  ],
+  {
+    body: "Front and back",
+  },
+);
+
 await sendTyping(room.roomId);
 ```
 
@@ -209,7 +229,8 @@ message bodies.
 - `addReaction({ roomId, targetMessageId, emoji })` to add a reaction to a message.
 - `removeReaction({ roomId, targetMessageId, emoji })` to remove the current user's reaction.
 - `uploadAttachment(roomId, attachment)` to upload a file or image through your attachment adapter.
-- `sendAttachment(roomId, attachment)` to send an uploaded attachment into a room.
+- `sendAttachment(roomId, attachment)` to upload and send one file or image into a room.
+- `sendAttachments(roomId, attachments, options)` to upload multiple files or images and send them in one room message with an optional `body` caption.
 - `sendFormSubmission({ roomId, payload })` to send a JSON form submission payload.
 - `sendMessage({ roomId, body })` for raw messages. Deprecated. Prefer `sendChatMessage()` or `sendFormSubmission()`.
 - `sendTyping(roomId)` to send composing. The SDK sends paused after 10 seconds.
@@ -259,7 +280,7 @@ The SDK uses one XMPP account per app user and the device id as the XMPP resourc
 
 The SDK enables Message Carbons (XEP-0280) for its resource after each successful connection. The XMPP server owns copy generation and routing. The SDK unwraps sent and received carbon stanzas. Room-directory peers should resolve to bare user JIDs such as `i.<peer>@domain`. Use `targetScope: "resource"` with a full JID only for device sync or control messages.
 
-`sendChatMessage`, `sendAttachment`, `sendFormSubmission`, `sendTyping`, and `markRead` use `targetScope: "user"` by default. They strip `/resource` from explicit, cached, and room-directory targets before sending. Set `targetScope: "resource"` only for device-specific control traffic. The low-level `sendMessage` API keeps resource targeting as its default.
+`sendChatMessage`, `sendAttachment`, `sendAttachments`, `sendFormSubmission`, `sendTyping`, and `markRead` use `targetScope: "user"` by default. They strip `/resource` from explicit, cached, and room-directory targets before sending. Set `targetScope: "resource"` only for device-specific control traffic. The low-level `sendMessage` API keeps resource targeting as its default.
 
 ```ts
 const roomDirectory = createRoomDirectory({
