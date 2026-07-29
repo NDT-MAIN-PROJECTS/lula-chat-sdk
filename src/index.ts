@@ -49,6 +49,18 @@ export type ChatReactionEvent = {
   removed: boolean;
 };
 
+export type ChatRetractionEvent = {
+  id: string;
+  targetMessageId: string;
+  fromUserId: string;
+  fromFullAddress: string;
+  fromDeviceId: DeviceId;
+  toDeviceId: DeviceId;
+  roomId: string;
+  timestamp: number;
+  raw?: unknown;
+};
+
 export type ChatMessageMetadata = Record<string, unknown> & {
   messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION";
   canonicalEventId?: string;
@@ -318,6 +330,13 @@ export type ChatReactionMessageInput = Omit<ChatTextMessageInput, "body"> & {
   targetMessageId: string;
   emoji: ChatReactionEmoji;
   actorId?: string;
+};
+
+export type ChatRetractionInput = Omit<
+  ChatMessageInput,
+  "attachments" | "body" | "metadata" | "requestReceipt"
+> & {
+  messageId: string;
 };
 
 export type ChatReactionSummary = {
@@ -701,6 +720,7 @@ export type ChatClient = {
   sendReply: (message: ChatReplyMessageInput) => Promise<string>;
   addReaction: (message: ChatReactionMessageInput) => Promise<string>;
   removeReaction: (message: ChatReactionMessageInput) => Promise<string>;
+  retractMessage: (message: ChatRetractionInput) => Promise<string>;
   sendFormSubmission: (message: ChatFormSubmissionInput) => Promise<string>;
   uploadAttachment: {
     (roomId: string, attachment: ChatAttachmentUpload): Promise<ChatAttachment>;
@@ -748,6 +768,7 @@ export type ChatClient = {
   onChatMessage: (listener: (message: ChatTextMessage) => void) => Unsubscribe;
   onAttachmentMessage: (listener: (message: ChatAttachmentMessage) => void) => Unsubscribe;
   onFormSubmission: (listener: (message: ChatFormSubmissionMessage) => void) => Unsubscribe;
+  onRetraction: (listener: (event: ChatRetractionEvent) => void) => Unsubscribe;
   onTyping: (listener: (event: ChatTypingEvent) => void) => Unsubscribe;
   onDelivery: (listener: (event: ChatDeliveryEvent) => void) => Unsubscribe;
   onError: (listener: (event: ChatErrorEvent) => void) => Unsubscribe;
@@ -793,6 +814,9 @@ const XMPP_CHATSTATES_NS = "http://jabber.org/protocol/chatstates";
 const XMPP_HTTP_UPLOAD_NS = "urn:xmpp:http:upload:0";
 const XMPP_CARBONS_NS = "urn:xmpp:carbons:2";
 const XMPP_FORWARD_NS = "urn:xmpp:forward:0";
+const XMPP_FALLBACK_NS = "urn:xmpp:fallback:0";
+const XMPP_HINTS_NS = "urn:xmpp:hints";
+const XMPP_RETRACT_NS = "urn:xmpp:message-retract:1";
 const OMEMO_NS = "eu.siacs.conversations.axolotl";
 const OMEMO_DEVICELIST_NODE = "eu.siacs.conversations.axolotl.devicelist";
 const OMEMO_BUNDLE_NODE_PREFIX = "eu.siacs.conversations.axolotl.bundles:";
@@ -965,6 +989,8 @@ class LulaChatClient implements ChatClient {
 
   private readonly typingListeners = new Set<(event: ChatTypingEvent) => void>();
 
+  private readonly retractionListeners = new Set<(event: ChatRetractionEvent) => void>();
+
   private readonly deliveryListeners = new Set<(event: ChatDeliveryEvent) => void>();
 
   private readonly errorListeners = new Set<(event: ChatErrorEvent) => void>();
@@ -1086,6 +1112,57 @@ class LulaChatClient implements ChatClient {
 
   public removeReaction(input: ChatReactionMessageInput): Promise<string> {
     return this.sendReaction(input, true);
+  }
+
+  public async retractMessage(input: ChatRetractionInput): Promise<string> {
+    const targetMessageId = input.messageId.trim();
+    if (!targetMessageId) throw new Error("chat_retraction_target_required");
+
+    const roomId = input.roomId?.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+
+    await this.connect();
+    const id = input.id || `retract-${generateMessageId()}`;
+    const targetRoomId = input.targetRoomId?.trim() || roomId;
+    const targetScope = input.targetScope ?? "user";
+    const targetDeviceIds = await this.resolveRoomTargets({
+      roomId: targetRoomId,
+      explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope,
+    });
+    const fallbackBody = "/me retracted a previous message.";
+    const metadata = normalizeMessageMetadata(undefined, "CHAT_MESSAGE");
+
+    await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
+      const encodedPayload = await this.encodePayload({
+        toDeviceId,
+        body: fallbackBody,
+        metadata,
+      });
+      const children: XmppChild[] = [
+        xml("body", {}, encodedPayload.body ?? fallbackBody),
+        ...encodedPayload.children,
+        xml("thread", {}, roomId),
+        xml("retract", { xmlns: XMPP_RETRACT_NS, id: targetMessageId }),
+        xml("fallback", { xmlns: XMPP_FALLBACK_NS, for: XMPP_RETRACT_NS }),
+        xml("store", { xmlns: XMPP_HINTS_NS }),
+      ];
+      await this.requireXmpp().send(
+        xml("message", { to: toDeviceId, type: "chat", id }, ...children),
+      );
+    });
+
+    this.rememberRoomPeers(roomId, targetDeviceIds);
+    if (targetRoomId !== roomId) {
+      this.rememberRoomPeers(targetRoomId, targetDeviceIds);
+    }
+    this.log("info", "chat_message_retraction_sent", {
+      id,
+      targetMessageId,
+      roomId,
+      targetCount: targetDeviceIds.length,
+    });
+    return id;
   }
 
   private sendReaction(input: ChatReactionMessageInput, removed: boolean): Promise<string> {
@@ -1433,6 +1510,10 @@ class LulaChatClient implements ChatClient {
     });
   }
 
+  public onRetraction(listener: (event: ChatRetractionEvent) => void): Unsubscribe {
+    return addListener(this.retractionListeners, listener);
+  }
+
   public onTyping(listener: (event: ChatTypingEvent) => void): Unsubscribe {
     return addListener(this.typingListeners, listener);
   }
@@ -1745,6 +1826,38 @@ class LulaChatClient implements ChatClient {
         toDeviceId,
         roomId,
         raw: messageStanza,
+      });
+      return;
+    }
+
+    const retraction = messageStanza.getChild?.("retract", XMPP_RETRACT_NS);
+    const retractedMessageId = retraction?.attrs?.id?.trim();
+    if (retractedMessageId) {
+      if (!roomId || !toDeviceId) {
+        this.log("debug", "chat_message_retraction_ignored_missing_context", {
+          id: attrs.id,
+          targetMessageId: retractedMessageId,
+          roomId,
+        });
+        return;
+      }
+      const emittedRetractionId = attrs.id || generateMessageId();
+      this.emit(this.retractionListeners, {
+        id: emittedRetractionId,
+        targetMessageId: retractedMessageId,
+        fromUserId,
+        fromFullAddress,
+        fromDeviceId,
+        toDeviceId,
+        roomId,
+        timestamp: parseDelayTimestamp(messageStanza) ?? Date.now(),
+        raw: messageStanza,
+      });
+      this.log("debug", "chat_message_retraction_received", {
+        id: emittedRetractionId,
+        targetMessageId: retractedMessageId,
+        roomId,
+        fromDeviceId,
       });
       return;
     }
