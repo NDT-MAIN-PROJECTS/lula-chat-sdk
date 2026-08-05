@@ -23,7 +23,13 @@ export type DeviceId = string;
 
 export type ChatTargetScope = "user" | "resource";
 
-type ChatMessageType = "CHAT_MESSAGE" | "FORM_SUBMISSION";
+type ChatMessageType = "CHAT_MESSAGE" | "FORM_SUBMISSION" | "CONVERSATION_STATE";
+
+export const CHAT_CONVERSATION_STATE_MESSAGE_TYPE = "CONVERSATION_STATE" as const;
+
+export type ChatConversationState = "open" | "closed";
+
+export type ChatConversationType = "form_submission";
 
 export const CHAT_REACTION_INTERACTION_TYPE = "CHAT_REACTION" as const;
 export const CHAT_REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
@@ -49,8 +55,20 @@ export type ChatReactionEvent = {
   removed: boolean;
 };
 
+export type ChatRetractionEvent = {
+  id: string;
+  targetMessageId: string;
+  fromUserId: string;
+  fromFullAddress: string;
+  fromDeviceId: DeviceId;
+  toDeviceId: DeviceId;
+  roomId: string;
+  timestamp: number;
+  raw?: unknown;
+};
+
 export type ChatMessageMetadata = Record<string, unknown> & {
-  messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION";
+  messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION" | typeof CHAT_CONVERSATION_STATE_MESSAGE_TYPE;
   canonicalEventId?: string;
   replyTo?: ChatReplyReference;
   chatInteractionType?: typeof CHAT_REACTION_INTERACTION_TYPE;
@@ -320,6 +338,13 @@ export type ChatReactionMessageInput = Omit<ChatTextMessageInput, "body"> & {
   actorId?: string;
 };
 
+export type ChatRetractionInput = Omit<
+  ChatMessageInput,
+  "attachments" | "body" | "metadata" | "requestReceipt"
+> & {
+  messageId: string;
+};
+
 export type ChatReactionSummary = {
   emoji: ChatReactionEmoji;
   count: number;
@@ -523,6 +548,34 @@ export type ChatFormSubmissionMessage = ChatMessage & {
   displayName?: string;
 };
 
+export type ChatConversationStateInput = Omit<
+  ChatMessageInput,
+  "attachments" | "body" | "metadata"
+> & {
+  roomId: string;
+  conversationType: ChatConversationType;
+  state: ChatConversationState;
+  conversationId?: string;
+  changedAt?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type ChatConversationStateEvent = {
+  id: string;
+  fromUserId: string;
+  fromFullAddress: string;
+  fromDeviceId: DeviceId;
+  toDeviceId: DeviceId;
+  roomId: string;
+  conversationType: ChatConversationType;
+  state: ChatConversationState;
+  conversationId?: string;
+  changedAt: string;
+  timestamp: number;
+  metadata: ChatMessageMetadata;
+  raw?: unknown;
+};
+
 export type ChatAttachmentMessageInput = Omit<
   ChatTextMessageInput,
   "body" | "attachments"
@@ -551,6 +604,17 @@ export type ChatTypingInput = {
   id?: string;
 };
 
+export type ChatThreadGoneInput = {
+  roomId: string;
+  targetRoomId?: string;
+  targetScope?: ChatTargetScope;
+  peerDeviceId?: DeviceId;
+  peerDeviceIds?: DeviceId[];
+  toDeviceId?: DeviceId;
+  toDeviceIds?: DeviceId[];
+  id?: string;
+};
+
 export type ChatDisplayedInput = {
   roomId: string;
   messageId: string;
@@ -569,6 +633,17 @@ export type ChatTypingEvent = {
   toDeviceId?: DeviceId;
   roomId: string;
   isTyping: boolean;
+  raw?: unknown;
+};
+
+export type ChatThreadGoneEvent = {
+  id: string;
+  fromUserId: string;
+  fromFullAddress: string;
+  fromDeviceId: DeviceId;
+  toDeviceId?: DeviceId;
+  roomId: string;
+  timestamp: number;
   raw?: unknown;
 };
 
@@ -701,7 +776,9 @@ export type ChatClient = {
   sendReply: (message: ChatReplyMessageInput) => Promise<string>;
   addReaction: (message: ChatReactionMessageInput) => Promise<string>;
   removeReaction: (message: ChatReactionMessageInput) => Promise<string>;
+  retractMessage: (message: ChatRetractionInput) => Promise<string>;
   sendFormSubmission: (message: ChatFormSubmissionInput) => Promise<string>;
+  sendConversationState: (event: ChatConversationStateInput) => Promise<string>;
   uploadAttachment: {
     (roomId: string, attachment: ChatAttachmentUpload): Promise<ChatAttachment>;
     (input: { roomId: string; attachment: ChatAttachmentUpload }): Promise<ChatAttachment>;
@@ -737,6 +814,10 @@ export type ChatClient = {
     (roomId: string, options?: Omit<ChatTypingInput, "roomId">): Promise<void>;
     (input: ChatTypingInput): Promise<void>;
   };
+  sendThreadGone: {
+    (roomId: string, options?: Omit<ChatThreadGoneInput, "roomId">): Promise<string>;
+    (input: ChatThreadGoneInput): Promise<string>;
+  };
   markRead: {
     (roomId: string, messageId: string, options?: Omit<ChatDisplayedInput, "roomId" | "messageId">): Promise<void>;
     (input: ChatDisplayedInput): Promise<void>;
@@ -748,6 +829,9 @@ export type ChatClient = {
   onChatMessage: (listener: (message: ChatTextMessage) => void) => Unsubscribe;
   onAttachmentMessage: (listener: (message: ChatAttachmentMessage) => void) => Unsubscribe;
   onFormSubmission: (listener: (message: ChatFormSubmissionMessage) => void) => Unsubscribe;
+  onConversationState: (listener: (event: ChatConversationStateEvent) => void) => Unsubscribe;
+  onThreadGone: (listener: (event: ChatThreadGoneEvent) => void) => Unsubscribe;
+  onRetraction: (listener: (event: ChatRetractionEvent) => void) => Unsubscribe;
   onTyping: (listener: (event: ChatTypingEvent) => void) => Unsubscribe;
   onDelivery: (listener: (event: ChatDeliveryEvent) => void) => Unsubscribe;
   onError: (listener: (event: ChatErrorEvent) => void) => Unsubscribe;
@@ -793,6 +877,9 @@ const XMPP_CHATSTATES_NS = "http://jabber.org/protocol/chatstates";
 const XMPP_HTTP_UPLOAD_NS = "urn:xmpp:http:upload:0";
 const XMPP_CARBONS_NS = "urn:xmpp:carbons:2";
 const XMPP_FORWARD_NS = "urn:xmpp:forward:0";
+const XMPP_FALLBACK_NS = "urn:xmpp:fallback:0";
+const XMPP_HINTS_NS = "urn:xmpp:hints";
+const XMPP_RETRACT_NS = "urn:xmpp:message-retract:1";
 const OMEMO_NS = "eu.siacs.conversations.axolotl";
 const OMEMO_DEVICELIST_NODE = "eu.siacs.conversations.axolotl.devicelist";
 const OMEMO_BUNDLE_NODE_PREFIX = "eu.siacs.conversations.axolotl.bundles:";
@@ -965,6 +1052,10 @@ class LulaChatClient implements ChatClient {
 
   private readonly typingListeners = new Set<(event: ChatTypingEvent) => void>();
 
+  private readonly threadGoneListeners = new Set<(event: ChatThreadGoneEvent) => void>();
+
+  private readonly retractionListeners = new Set<(event: ChatRetractionEvent) => void>();
+
   private readonly deliveryListeners = new Set<(event: ChatDeliveryEvent) => void>();
 
   private readonly errorListeners = new Set<(event: ChatErrorEvent) => void>();
@@ -1088,6 +1179,57 @@ class LulaChatClient implements ChatClient {
     return this.sendReaction(input, true);
   }
 
+  public async retractMessage(input: ChatRetractionInput): Promise<string> {
+    const targetMessageId = input.messageId.trim();
+    if (!targetMessageId) throw new Error("chat_retraction_target_required");
+
+    const roomId = input.roomId?.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+
+    await this.connect();
+    const id = input.id || `retract-${generateMessageId()}`;
+    const targetRoomId = input.targetRoomId?.trim() || roomId;
+    const targetScope = input.targetScope ?? "user";
+    const targetDeviceIds = await this.resolveRoomTargets({
+      roomId: targetRoomId,
+      explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope,
+    });
+    const fallbackBody = "/me retracted a previous message.";
+    const metadata = normalizeMessageMetadata(undefined, "CHAT_MESSAGE");
+
+    await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
+      const encodedPayload = await this.encodePayload({
+        toDeviceId,
+        body: fallbackBody,
+        metadata,
+      });
+      const children: XmppChild[] = [
+        xml("body", {}, encodedPayload.body ?? fallbackBody),
+        ...encodedPayload.children,
+        xml("thread", {}, roomId),
+        xml("retract", { xmlns: XMPP_RETRACT_NS, id: targetMessageId }),
+        xml("fallback", { xmlns: XMPP_FALLBACK_NS, for: XMPP_RETRACT_NS }),
+        xml("store", { xmlns: XMPP_HINTS_NS }),
+      ];
+      await this.requireXmpp().send(
+        xml("message", { to: toDeviceId, type: "chat", id }, ...children),
+      );
+    });
+
+    this.rememberRoomPeers(roomId, targetDeviceIds);
+    if (targetRoomId !== roomId) {
+      this.rememberRoomPeers(targetRoomId, targetDeviceIds);
+    }
+    this.log("info", "chat_message_retraction_sent", {
+      id,
+      targetMessageId,
+      roomId,
+      targetCount: targetDeviceIds.length,
+    });
+    return id;
+  }
+
   private sendReaction(input: ChatReactionMessageInput, removed: boolean): Promise<string> {
     const { targetMessageId, emoji, actorId, metadata, ...message } = input;
     const normalizedTargetMessageId = targetMessageId.trim();
@@ -1125,6 +1267,66 @@ class LulaChatClient implements ChatClient {
       },
       "user",
     );
+  }
+
+  public async sendConversationState(input: ChatConversationStateInput): Promise<string> {
+    const roomId = input.roomId.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+    if (input.conversationType !== "form_submission") {
+      throw new Error("chat_conversation_type_invalid");
+    }
+    if (input.state !== "open" && input.state !== "closed") {
+      throw new Error("chat_conversation_state_invalid");
+    }
+    const changedAt = normalizeIsoDate(input.changedAt) ?? new Date().toISOString();
+    const metadata = normalizeMessageMetadata(
+      {
+        ...(input.metadata ?? {}),
+        conversationType: input.conversationType,
+        conversationState: input.state,
+        conversationId: trimToUndefined(input.conversationId),
+        conversationChangedAt: changedAt,
+      },
+      CHAT_CONVERSATION_STATE_MESSAGE_TYPE,
+    );
+    const legacyId = await this.sendMessageInput(
+      {
+        toDeviceId: input.toDeviceId,
+        toDeviceIds: input.toDeviceIds,
+        peerDeviceId: input.peerDeviceId,
+        peerDeviceIds: input.peerDeviceIds,
+        roomId,
+        targetRoomId: input.targetRoomId,
+        targetScope: input.targetScope,
+        id: input.id,
+        requestReceipt: input.requestReceipt,
+        body: input.state === "closed" ? "Conversation closed" : "Conversation reopened",
+        metadata,
+      },
+      "user",
+    );
+    if (input.state === "closed") {
+      try {
+        await this.sendThreadGone({
+          toDeviceId: input.toDeviceId,
+          toDeviceIds: input.toDeviceIds,
+          peerDeviceId: input.peerDeviceId,
+          peerDeviceIds: input.peerDeviceIds,
+          roomId,
+          targetRoomId: input.targetRoomId,
+          targetScope: input.targetScope,
+          id: input.id ? `${input.id}-gone` : undefined,
+        });
+      } catch (error) {
+        // Preserve the legacy state event during migration if the standards-based
+        // chat-state signal cannot be sent to any target.
+        this.log("warn", "chat_thread_gone_compat_send_failed", {
+          roomId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return legacyId;
   }
 
   public async uploadAttachment(
@@ -1276,6 +1478,9 @@ class LulaChatClient implements ChatClient {
       ];
 
       if (roomId) children.push(xml("thread", {}, roomId));
+      if (metadata.messageType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE) {
+        children.push(xml("store", { xmlns: XMPP_HINTS_NS }));
+      }
       if (input.requestReceipt !== false) {
         children.push(xml("request", { xmlns: XMPP_RECEIPTS_NS }));
         children.push(xml("markable", { xmlns: XMPP_CHAT_MARKERS_NS }));
@@ -1348,6 +1553,57 @@ class LulaChatClient implements ChatClient {
     });
   }
 
+  public async sendThreadGone(
+    inputOrRoomId: ChatThreadGoneInput | string,
+    options?: Omit<ChatThreadGoneInput, "roomId">,
+  ): Promise<string> {
+    const input =
+      typeof inputOrRoomId === "string"
+        ? { ...(options ?? {}), roomId: inputOrRoomId }
+        : inputOrRoomId;
+    const roomId = input.roomId.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+    const targetRoomId = input.targetRoomId?.trim() || roomId;
+    const targetScope = input.targetScope ?? "user";
+    const targetDeviceIds = await this.resolveRoomTargets({
+      roomId: targetRoomId,
+      explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope,
+    });
+    const id = input.id?.trim() || `gone-${generateMessageId()}`;
+
+    this.log("debug", "chat_thread_gone_send_started", {
+      id,
+      roomId,
+      targetRoomId,
+      targetScope,
+      targetCount: targetDeviceIds.length,
+    });
+    this.rememberRoomPeers(roomId, targetDeviceIds);
+    if (targetRoomId !== roomId) {
+      this.rememberRoomPeers(targetRoomId, targetDeviceIds);
+    }
+    this.clearTypingAutoPause(roomId);
+    await this.connect();
+    await this.sendToTargets(targetDeviceIds, (toDeviceId) =>
+      this.requireXmpp().send(
+        xml(
+          "message",
+          { to: toDeviceId, type: "chat", id },
+          xml("thread", {}, roomId),
+          xml("gone", { xmlns: XMPP_CHATSTATES_NS }),
+        ),
+      ),
+    );
+    this.log("debug", "chat_thread_gone_sent", {
+      id,
+      roomId,
+      targetRoomId,
+      targetCount: targetDeviceIds.length,
+    });
+    return id;
+  }
+
   public async markRead(
     inputOrRoomId: ChatDisplayedInput | string,
     messageId?: string,
@@ -1413,6 +1669,7 @@ class LulaChatClient implements ChatClient {
 
   public onChatMessage(listener: (message: ChatTextMessage) => void): Unsubscribe {
     return this.onMessage((message) => {
+      if (isConversationStateMessage(message)) return;
       if (isFormSubmissionMessage(message)) return;
       if (isAttachmentMessage(message)) return;
       listener(toChatTextMessage(message));
@@ -1431,6 +1688,23 @@ class LulaChatClient implements ChatClient {
       const parsed = parseFormSubmissionMessage(message);
       if (parsed) listener(parsed);
     });
+  }
+
+  public onConversationState(
+    listener: (event: ChatConversationStateEvent) => void,
+  ): Unsubscribe {
+    return this.onMessage((message) => {
+      const event = parseConversationStateMessage(message);
+      if (event) listener(event);
+    });
+  }
+
+  public onThreadGone(listener: (event: ChatThreadGoneEvent) => void): Unsubscribe {
+    return addListener(this.threadGoneListeners, listener);
+  }
+
+  public onRetraction(listener: (event: ChatRetractionEvent) => void): Unsubscribe {
+    return addListener(this.retractionListeners, listener);
   }
 
   public onTyping(listener: (event: ChatTypingEvent) => void): Unsubscribe {
@@ -1751,6 +2025,7 @@ class LulaChatClient implements ChatClient {
 
     const composing = messageStanza.getChild?.("composing", XMPP_CHATSTATES_NS);
     const paused = messageStanza.getChild?.("paused", XMPP_CHATSTATES_NS);
+    const gone = messageStanza.getChild?.("gone", XMPP_CHATSTATES_NS);
     if ((composing || paused) && roomId) {
       this.emit(this.typingListeners, {
         fromUserId,
@@ -1767,12 +2042,37 @@ class LulaChatClient implements ChatClient {
         isTyping: Boolean(composing),
       });
     }
+    if (gone) {
+      if (roomId) {
+        const eventId = attrs.id || generateMessageId();
+        this.emit(this.threadGoneListeners, {
+          id: eventId,
+          fromUserId,
+          fromFullAddress,
+          fromDeviceId,
+          toDeviceId,
+          roomId,
+          timestamp: parseDelayTimestamp(messageStanza) ?? Date.now(),
+          raw: messageStanza,
+        });
+        this.log("debug", "chat_thread_gone_received", {
+          id: eventId,
+          roomId,
+          fromDeviceId,
+        });
+      } else {
+        this.log("debug", "chat_thread_gone_ignored_missing_room", {
+          id: attrs.id,
+          fromDeviceId,
+        });
+      }
+    }
 
     const decoded = await this.decodePayload(messageStanza);
     const body = decoded.body;
     const attachments = normalizeAttachmentPayload(decoded.attachments);
     if (!body.trim() && !attachments?.length) {
-      this.log("debug", "chat_message_ignored_empty", {
+      this.log("debug", gone ? "chat_message_ignored_chat_state" : "chat_message_ignored_empty", {
         id: attrs.id,
         fromDeviceId,
         roomId,
@@ -2833,7 +3133,13 @@ export function extractDisplayName(metadata?: Record<string, unknown>): string |
 
 function extractMessageType(metadata?: Record<string, unknown>): ChatMessageType | undefined {
   const rawType = firstString(metadata?.messageType, metadata?.type);
-  if (rawType === "CHAT_MESSAGE" || rawType === "FORM_SUBMISSION") return rawType;
+  if (
+    rawType === "CHAT_MESSAGE" ||
+    rawType === "FORM_SUBMISSION" ||
+    rawType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE
+  ) {
+    return rawType;
+  }
   return undefined;
 }
 
@@ -2995,6 +3301,44 @@ export function buildFormSubmissionMetadata(
   });
 
   return metadata;
+}
+
+export function parseConversationStateMessage(
+  message: ChatMessage,
+): ChatConversationStateEvent | null {
+  if (
+    extractMessageType(message.metadata) !==
+    CHAT_CONVERSATION_STATE_MESSAGE_TYPE
+  ) {
+    return null;
+  }
+  const conversationType = firstString(message.metadata.conversationType);
+  const state = firstString(message.metadata.conversationState);
+  if (conversationType !== "form_submission") return null;
+  if (state !== "open" && state !== "closed") return null;
+  const changedAt =
+    normalizeIsoDate(firstString(message.metadata.conversationChangedAt)) ??
+    new Date(message.timestamp).toISOString();
+  const conversationId = firstString(message.metadata.conversationId);
+  return {
+    id: message.id,
+    fromUserId: message.fromUserId,
+    fromFullAddress: message.fromFullAddress,
+    fromDeviceId: message.fromDeviceId,
+    toDeviceId: message.toDeviceId,
+    roomId: message.roomId,
+    conversationType,
+    state,
+    ...(conversationId ? { conversationId } : {}),
+    changedAt,
+    timestamp: message.timestamp,
+    metadata: message.metadata,
+    raw: message.raw,
+  };
+}
+
+function isConversationStateMessage(message: ChatMessage): boolean {
+  return Boolean(parseConversationStateMessage(message));
 }
 
 function collectTargetDeviceIds(input: {
@@ -3503,6 +3847,13 @@ function normalizeBareDeviceId(deviceId?: string | null): DeviceId {
 function trimToUndefined(value?: string | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function normalizeIsoDate(value?: string | null): string | undefined {
+  const normalized = trimToUndefined(value);
+  if (!normalized) return undefined;
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
 }
 
 function normalizeResourceSegment(value: string): string {

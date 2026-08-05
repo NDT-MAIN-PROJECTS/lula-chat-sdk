@@ -31,6 +31,8 @@ const {
   onChatMessage,
   onAttachmentMessage,
   onFormSubmission,
+  onConversationState,
+  onThreadGone,
   sendChatMessage,
   sendReply,
   addReaction,
@@ -38,6 +40,8 @@ const {
   sendAttachment,
   sendAttachments,
   sendFormSubmission,
+  sendConversationState,
+  sendThreadGone,
   sendTyping,
   markRead,
   resolveAttachment,
@@ -66,6 +70,16 @@ onFormSubmission((message) => {
 
 onAttachmentMessage((message) => {
   console.log(message.attachments[0]?.name);
+});
+
+onConversationState((event) => {
+  if (event.conversationType === "form_submission" && event.state === "closed") {
+    console.log("Disable the composer for", event.roomId);
+  }
+});
+
+onThreadGone((event) => {
+  console.log("Thread ended", event.roomId);
 });
 
 await connect();
@@ -117,6 +131,21 @@ await sendFormSubmission({
     },
   },
   formId: "form-123",
+});
+
+await sendConversationState({
+  roomId: "submission-room-id",
+  targetRoomId: room.roomId,
+  conversationType: "form_submission",
+  conversationId: "submission-123",
+  state: "closed",
+});
+
+// Standards-only XEP-0085 signal for consumers that do not need the temporary
+// Lula conversation-state compatibility payload.
+await sendThreadGone({
+  roomId: "submission-room-id",
+  targetRoomId: room.roomId,
 });
 
 await sendAttachment(room.roomId, {
@@ -214,6 +243,8 @@ message bodies.
 - `onChatMessage(listener)` for human chat messages.
 - `onAttachmentMessage(listener)` for attachment messages.
 - `onFormSubmission(listener)` for structured form submission payloads.
+- `onConversationState(listener)` for typed form-conversation open/closed control events. These events are not emitted by `onChatMessage()`.
+- `onThreadGone(listener)` for standard XEP-0085 `<gone/>` events keyed by the stanza `<thread>` value.
 - `onTyping(listener)` for composing and paused states.
 - `onDelivery(listener)` for delivered and read events.
 - `onError(listener)` for stanza and runtime errors.
@@ -232,6 +263,8 @@ message bodies.
 - `sendAttachment(roomId, attachment)` to upload and send one file or image into a room.
 - `sendAttachments(roomId, attachments, options)` to upload multiple files or images and send them in one room message with an optional `body` caption.
 - `sendFormSubmission({ roomId, payload })` to send a JSON form submission payload.
+- `sendConversationState({ roomId, targetRoomId, conversationType, state })` to notify every participant device that a logical form conversation changed state.
+- `sendThreadGone({ roomId, targetRoomId })` to send a standalone XEP-0085 `<gone/>` state for a thread.
 - `sendMessage({ roomId, body })` for raw messages. Deprecated. Prefer `sendChatMessage()` or `sendFormSubmission()`.
 - `sendTyping(roomId)` to send composing. The SDK sends paused after 10 seconds.
 - `sendTyping(roomId, { isTyping: false })` to send paused at once.
@@ -245,6 +278,8 @@ The SDK remembers room peers after sends and incoming room messages.
 Fanout treats partial delivery as success. It only throws after every target send fails.
 
 Incoming chat, form submission, typing, and delivery events include both `fromUserId` and `fromDeviceId`. Use `fromUserId` for app-user matching and `fromDeviceId` for device-level delivery or fanout logic.
+
+During the conversation-state migration, sending a `closed` state also sends `<gone/>` on a best-effort basis so upgraded and legacy clients remain compatible. `<gone/>` is a client signal rather than server-side authorization; applications should retain durable closure state and enforce it when deciding whether a thread is writable.
 
 ## Room Directory
 
