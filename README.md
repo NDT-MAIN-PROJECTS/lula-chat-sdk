@@ -33,6 +33,7 @@ const {
   onFormSubmission,
   onConversationState,
   onThreadGone,
+  onEmergency,
   sendChatMessage,
   sendReply,
   addReaction,
@@ -42,6 +43,7 @@ const {
   sendFormSubmission,
   sendConversationState,
   sendThreadGone,
+  sendEmergency,
   sendTyping,
   markRead,
   resolveAttachment,
@@ -82,11 +84,22 @@ onThreadGone((event) => {
   console.log("Thread ended", event.roomId);
 });
 
+onEmergency((message) => {
+  console.log("Emergency alert", message.alertId, message.body);
+});
+
 await connect();
 
 const room = await chatClient.getOrCreateRoom("peer-user-id");
 
 await sendChatMessage(room.roomId, "Hello");
+
+await sendEmergency({
+  roomId: room.roomId,
+  body: "I need urgent help. Please contact me now.",
+  alertId: "alert-123",
+  triggeredAt: new Date().toISOString(),
+});
 
 await sendChatMessage({
   roomId: room.roomId,
@@ -245,6 +258,7 @@ message bodies.
 - `onFormSubmission(listener)` for structured form submission payloads.
 - `onConversationState(listener)` for typed form-conversation open/closed control events. These events are not emitted by `onChatMessage()`.
 - `onThreadGone(listener)` for standard XEP-0085 `<gone/>` events keyed by the stanza `<thread>` value.
+- `onEmergency(listener)` for typed SOS messages. Emergency messages are not emitted by `onChatMessage()`.
 - `onTyping(listener)` for composing and paused states.
 - `onDelivery(listener)` for delivered and read events.
 - `onError(listener)` for stanza and runtime errors.
@@ -265,6 +279,7 @@ message bodies.
 - `sendFormSubmission({ roomId, payload })` to send a JSON form submission payload.
 - `sendConversationState({ roomId, targetRoomId, conversationType, state })` to notify every participant device that a logical form conversation changed state.
 - `sendThreadGone({ roomId, targetRoomId })` to send a standalone XEP-0085 `<gone/>` state for a thread.
+- `sendEmergency({ roomId, body, alertId, triggeredAt })` to send an encrypted SOS message carrying both typed metadata and a `<emergency xmlns="urn:lulafi:emergency:1"/>` stanza tag.
 - `sendMessage({ roomId, body })` for raw messages. Deprecated. Prefer `sendChatMessage()` or `sendFormSubmission()`.
 - `sendTyping(roomId)` to send composing. The SDK sends paused after 10 seconds.
 - `sendTyping(roomId, { isTyping: false })` to send paused at once.

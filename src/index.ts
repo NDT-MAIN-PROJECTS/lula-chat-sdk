@@ -23,9 +23,15 @@ export type DeviceId = string;
 
 export type ChatTargetScope = "user" | "resource";
 
-type ChatMessageType = "CHAT_MESSAGE" | "FORM_SUBMISSION" | "CONVERSATION_STATE";
+type ChatMessageType =
+  | "CHAT_MESSAGE"
+  | "FORM_SUBMISSION"
+  | "CONVERSATION_STATE"
+  | "EMERGENCY";
 
 export const CHAT_CONVERSATION_STATE_MESSAGE_TYPE = "CONVERSATION_STATE" as const;
+export const CHAT_EMERGENCY_MESSAGE_TYPE = "EMERGENCY" as const;
+export const CHAT_EMERGENCY_TYPE_SOS = "sos" as const;
 
 export type ChatConversationState = "open" | "closed";
 
@@ -68,7 +74,11 @@ export type ChatRetractionEvent = {
 };
 
 export type ChatMessageMetadata = Record<string, unknown> & {
-  messageType: "CHAT_MESSAGE" | "FORM_SUBMISSION" | typeof CHAT_CONVERSATION_STATE_MESSAGE_TYPE;
+  messageType:
+    | "CHAT_MESSAGE"
+    | "FORM_SUBMISSION"
+    | typeof CHAT_CONVERSATION_STATE_MESSAGE_TYPE
+    | typeof CHAT_EMERGENCY_MESSAGE_TYPE;
   canonicalEventId?: string;
   replyTo?: ChatReplyReference;
   chatInteractionType?: typeof CHAT_REACTION_INTERACTION_TYPE;
@@ -76,6 +86,9 @@ export type ChatMessageMetadata = Record<string, unknown> & {
   reactionEmoji?: ChatReactionEmoji;
   reactionActorId?: string;
   reactionRemoved?: boolean;
+  emergencyType?: typeof CHAT_EMERGENCY_TYPE_SOS;
+  emergencyAlertId?: string;
+  emergencyTriggeredAt?: string;
 };
 
 export type ChatLogLevel = "silent" | "error" | "warn" | "info" | "debug";
@@ -332,6 +345,13 @@ export type ChatReplyMessageInput = ChatTextMessageInput & {
   replyTo: ChatReplyReference;
 };
 
+export type ChatEmergencyMessageInput = Omit<ChatTextMessageInput, "metadata"> & {
+  alertId: string;
+  emergencyType?: typeof CHAT_EMERGENCY_TYPE_SOS;
+  triggeredAt?: string;
+  metadata?: Record<string, unknown>;
+};
+
 export type ChatReactionMessageInput = Omit<ChatTextMessageInput, "body"> & {
   targetMessageId: string;
   emoji: ChatReactionEmoji;
@@ -498,6 +518,12 @@ export type ChatTextMessage = ChatMessage & {
   submissionRoomId?: string;
   correlationId?: string;
   displayName: string;
+};
+
+export type ChatEmergencyMessage = ChatTextMessage & {
+  emergencyType: typeof CHAT_EMERGENCY_TYPE_SOS;
+  alertId: string;
+  triggeredAt: string;
 };
 
 export type ChatAttachmentMessage = ChatMessage & {
@@ -773,6 +799,7 @@ export type ChatClient = {
       options?: Omit<ChatTextMessageInput, "roomId" | "body">,
     ): Promise<string>;
   };
+  sendEmergency: (message: ChatEmergencyMessageInput) => Promise<string>;
   sendReply: (message: ChatReplyMessageInput) => Promise<string>;
   addReaction: (message: ChatReactionMessageInput) => Promise<string>;
   removeReaction: (message: ChatReactionMessageInput) => Promise<string>;
@@ -827,6 +854,7 @@ export type ChatClient = {
    */
   onMessage: (listener: (message: ChatMessage) => void) => Unsubscribe;
   onChatMessage: (listener: (message: ChatTextMessage) => void) => Unsubscribe;
+  onEmergency: (listener: (message: ChatEmergencyMessage) => void) => Unsubscribe;
   onAttachmentMessage: (listener: (message: ChatAttachmentMessage) => void) => Unsubscribe;
   onFormSubmission: (listener: (message: ChatFormSubmissionMessage) => void) => Unsubscribe;
   onConversationState: (listener: (event: ChatConversationStateEvent) => void) => Unsubscribe;
@@ -880,6 +908,7 @@ const XMPP_FORWARD_NS = "urn:xmpp:forward:0";
 const XMPP_FALLBACK_NS = "urn:xmpp:fallback:0";
 const XMPP_HINTS_NS = "urn:xmpp:hints";
 const XMPP_RETRACT_NS = "urn:xmpp:message-retract:1";
+export const XMPP_EMERGENCY_NS = "urn:lulafi:emergency:1" as const;
 const OMEMO_NS = "eu.siacs.conversations.axolotl";
 const OMEMO_DEVICELIST_NODE = "eu.siacs.conversations.axolotl.devicelist";
 const OMEMO_BUNDLE_NODE_PREFIX = "eu.siacs.conversations.axolotl.bundles:";
@@ -1150,6 +1179,36 @@ class LulaChatClient implements ChatClient {
         : inputOrRoomId;
     const metadata = buildChatMessageMetadata({
       ...input,
+      displayName: this.config.displayName,
+    });
+    const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
+    return this.sendMessageInput(
+      {
+        ...input,
+        metadata,
+        targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId,
+      },
+      "user",
+    );
+  }
+
+  public async sendEmergency(input: ChatEmergencyMessageInput): Promise<string> {
+    const alertId = input.alertId.trim();
+    if (!alertId) throw new Error("chat_emergency_alert_id_required");
+    const emergencyType = input.emergencyType ?? CHAT_EMERGENCY_TYPE_SOS;
+    if (emergencyType !== CHAT_EMERGENCY_TYPE_SOS) {
+      throw new Error("chat_emergency_type_invalid");
+    }
+    const triggeredAt = normalizeIsoDate(input.triggeredAt) ?? new Date().toISOString();
+    const metadata = buildChatMessageMetadata({
+      ...input,
+      metadata: {
+        ...(input.metadata ?? {}),
+        messageType: CHAT_EMERGENCY_MESSAGE_TYPE,
+        emergencyType,
+        emergencyAlertId: alertId,
+        emergencyTriggeredAt: triggeredAt,
+      },
       displayName: this.config.displayName,
     });
     const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
@@ -1478,6 +1537,17 @@ class LulaChatClient implements ChatClient {
       ];
 
       if (roomId) children.push(xml("thread", {}, roomId));
+      const emergency = parseEmergencyMetadata(metadata);
+      if (emergency) {
+        children.push(
+          xml("emergency", {
+            xmlns: XMPP_EMERGENCY_NS,
+            type: emergency.emergencyType,
+            "alert-id": emergency.alertId,
+            "triggered-at": emergency.triggeredAt,
+          }),
+        );
+      }
       if (metadata.messageType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE) {
         children.push(xml("store", { xmlns: XMPP_HINTS_NS }));
       }
@@ -1672,7 +1742,15 @@ class LulaChatClient implements ChatClient {
       if (isConversationStateMessage(message)) return;
       if (isFormSubmissionMessage(message)) return;
       if (isAttachmentMessage(message)) return;
+      if (isEmergencyMessage(message)) return;
       listener(toChatTextMessage(message));
+    });
+  }
+
+  public onEmergency(listener: (message: ChatEmergencyMessage) => void): Unsubscribe {
+    return this.onMessage((message) => {
+      const emergency = parseChatEmergencyMessage(message);
+      if (emergency) listener(emergency);
     });
   }
 
@@ -2088,9 +2166,21 @@ class LulaChatClient implements ChatClient {
       });
       return;
     }
+    const emergencyTag = messageStanza.getChild?.("emergency", XMPP_EMERGENCY_NS);
+    const emergencyTagMetadata = emergencyTag
+      ? {
+          messageType: CHAT_EMERGENCY_MESSAGE_TYPE,
+          emergencyType: emergencyTag.attrs?.type,
+          emergencyAlertId: emergencyTag.attrs?.["alert-id"],
+          emergencyTriggeredAt: emergencyTag.attrs?.["triggered-at"],
+        }
+      : undefined;
+    const decodedMetadata = emergencyTagMetadata
+      ? { ...(decoded.metadata ?? {}), ...emergencyTagMetadata }
+      : decoded.metadata;
     const metadata = normalizeMessageMetadata(
-      decoded.metadata,
-      inferMessageType(decoded.metadata, body),
+      decodedMetadata,
+      inferMessageType(decodedMetadata, body),
     );
     const emittedMessageId = attrs.id || generateMessageId();
 
@@ -3136,7 +3226,8 @@ function extractMessageType(metadata?: Record<string, unknown>): ChatMessageType
   if (
     rawType === "CHAT_MESSAGE" ||
     rawType === "FORM_SUBMISSION" ||
-    rawType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE
+    rawType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE ||
+    rawType === CHAT_EMERGENCY_MESSAGE_TYPE
   ) {
     return rawType;
   }
@@ -3435,6 +3526,42 @@ function toChatTextMessage(message: ChatMessage): ChatTextMessage {
     displayName,
     ...(Object.keys(context).length > 0 ? { context } : {}),
   };
+}
+
+function parseEmergencyMetadata(metadata?: Record<string, unknown>): {
+  emergencyType: typeof CHAT_EMERGENCY_TYPE_SOS;
+  alertId: string;
+  triggeredAt: string;
+} | null {
+  const emergencyType = firstString(metadata?.emergencyType);
+  const alertId = firstString(metadata?.emergencyAlertId);
+  const triggeredAt = normalizeIsoDate(firstString(metadata?.emergencyTriggeredAt));
+  if (
+    emergencyType !== CHAT_EMERGENCY_TYPE_SOS ||
+    !alertId ||
+    !triggeredAt
+  ) {
+    return null;
+  }
+  return { emergencyType, alertId, triggeredAt };
+}
+
+export function parseChatEmergencyMessage(
+  message: ChatMessage,
+): ChatEmergencyMessage | null {
+  const messageType = extractMessageType(message.metadata);
+  const emergency = parseEmergencyMetadata(message.metadata);
+  if (messageType !== CHAT_EMERGENCY_MESSAGE_TYPE || !emergency) {
+    return null;
+  }
+  return {
+    ...toChatTextMessage(message),
+    ...emergency,
+  };
+}
+
+export function isEmergencyMessage(message: ChatMessage): boolean {
+  return Boolean(parseChatEmergencyMessage(message));
 }
 
 function toChatAttachmentMessage(message: ChatMessage): ChatAttachmentMessage {
