@@ -73,6 +73,33 @@ export type ChatRetractionEvent = {
   raw?: unknown;
 };
 
+/**
+ * Applies the XEP-0424 author rule for direct chat messages.
+ */
+export function isRetractionAuthorized(
+  event: Pick<ChatRetractionEvent, "fromFullAddress" | "fromDeviceId">,
+  originalAuthorAddress?: string | null,
+): boolean {
+  const retractionAuthor = normalizeBareDeviceId(
+    event.fromFullAddress || event.fromDeviceId,
+  ).toLowerCase();
+  const originalAuthor = normalizeBareDeviceId(originalAuthorAddress).toLowerCase();
+  return Boolean(retractionAuthor && originalAuthor && retractionAuthor === originalAuthor);
+}
+
+export type ChatMessageAuthorResolverInput = {
+  roomId: string;
+  messageId: string;
+};
+
+/**
+ * Resolves the original sender JID from a consumer's persistent message store.
+ * The SDK uses this when the target message is not in its bounded runtime cache.
+ */
+export type ChatMessageAuthorResolver = (
+  input: ChatMessageAuthorResolverInput,
+) => Promise<string | null | undefined> | string | null | undefined;
+
 export type ChatMessageMetadata = Record<string, unknown> & {
   messageType:
     | "CHAT_MESSAGE"
@@ -257,6 +284,13 @@ export type ChatClientBaseConfig = {
 
   /** Fallback resolver for older room fanout call sites. Prefer roomDirectory. */
   resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
+
+  /**
+   * Persistent author lookup used to validate XEP-0424 retractions after a
+   * restart or when archive events arrive out of order. Unknown authors fail
+   * closed and no authoritative retraction event is emitted.
+   */
+  resolveMessageAuthor?: ChatMessageAuthorResolver;
 
   /** Optional logger for connection, encryption, and stanza errors. */
   logger?: ChatLogger;
@@ -859,6 +893,7 @@ export type ChatClient = {
   onFormSubmission: (listener: (message: ChatFormSubmissionMessage) => void) => Unsubscribe;
   onConversationState: (listener: (event: ChatConversationStateEvent) => void) => Unsubscribe;
   onThreadGone: (listener: (event: ChatThreadGoneEvent) => void) => Unsubscribe;
+  /** Emits only XEP-0424 retractions whose author was verified by the SDK. */
   onRetraction: (listener: (event: ChatRetractionEvent) => void) => Unsubscribe;
   onTyping: (listener: (event: ChatTypingEvent) => void) => Unsubscribe;
   onDelivery: (listener: (event: ChatDeliveryEvent) => void) => Unsubscribe;
@@ -927,6 +962,10 @@ const OMEMO_IQ_RETRY_DELAY_MS = 250;
 const DEFAULT_TYPING_AUTO_PAUSE_MS = 10000;
 const DEFAULT_OMEMO_STATE_KEY_PREFIX = "chat_sdk_omemo_state";
 const DEFAULT_XMPP_WEBSOCKET_PATH = "/chat/websocket";
+const MAX_RUNTIME_MESSAGE_AUTHORS_PER_ROOM = 500;
+const MAX_RUNTIME_MESSAGE_AUTHOR_ROOMS = 100;
+const MAX_PENDING_RETRACTIONS_PER_ROOM = 200;
+const MAX_PENDING_RETRACTION_ROOMS = 100;
 const CHAT_LOG_LEVEL_WEIGHT: Record<ChatLogLevel, number> = {
   silent: 0,
   error: 1,
@@ -1102,6 +1141,13 @@ class LulaChatClient implements ChatClient {
   private onlineDeviceId?: DeviceId;
 
   private readonly roomPeers = new Map<string, Set<string>>();
+
+  private readonly messageAuthorsByRoom = new Map<string, Map<string, string>>();
+
+  private readonly pendingRetractionsByRoom = new Map<
+    string,
+    Map<string, ChatRetractionEvent>
+  >();
 
   private readonly typingAutoPauseTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -1569,6 +1615,9 @@ class LulaChatClient implements ChatClient {
     this.rememberRoomPeers(roomId, targetDeviceIds);
     if (targetRoomId && targetRoomId !== roomId) {
       this.rememberRoomPeers(targetRoomId, targetDeviceIds);
+    }
+    if (roomId) {
+      this.rememberMessageAuthor(roomId, id, this.getDeviceId());
     }
     return id;
   }
@@ -2101,6 +2150,38 @@ class LulaChatClient implements ChatClient {
       return;
     }
 
+    const retraction = messageStanza.getChild?.("retract", XMPP_RETRACT_NS);
+    if (retraction) {
+      const targetMessageId = trimToUndefined(retraction.attrs?.id);
+      if (targetMessageId && roomId && toDeviceId) {
+        const eventId = attrs.id || generateMessageId();
+        await this.processRetraction({
+          id: eventId,
+          targetMessageId,
+          fromUserId,
+          fromFullAddress,
+          fromDeviceId,
+          toDeviceId,
+          roomId,
+          timestamp: parseDelayTimestamp(messageStanza) ?? Date.now(),
+          raw: messageStanza,
+        });
+      } else {
+        this.log("warn", "chat_message_retraction_ignored_missing_context", {
+          id: attrs.id,
+          targetMessageId,
+          roomId,
+          fromDeviceId,
+          hasToDeviceId: Boolean(toDeviceId),
+        });
+      }
+
+      // XEP-0424 includes a human-readable fallback body for clients that do
+      // not understand retractions. Supporting clients must not surface that
+      // fallback as a new chat message.
+      return;
+    }
+
     const composing = messageStanza.getChild?.("composing", XMPP_CHATSTATES_NS);
     const paused = messageStanza.getChild?.("paused", XMPP_CHATSTATES_NS);
     const gone = messageStanza.getChild?.("gone", XMPP_CHATSTATES_NS);
@@ -2183,8 +2264,7 @@ class LulaChatClient implements ChatClient {
       inferMessageType(decodedMetadata, body),
     );
     const emittedMessageId = attrs.id || generateMessageId();
-
-    this.emit(this.messageListeners, {
+    const message: ChatMessage = {
       id: emittedMessageId,
       fromUserId,
       fromFullAddress,
@@ -2196,7 +2276,11 @@ class LulaChatClient implements ChatClient {
       metadata,
       ...(attachments?.length ? { attachments } : {}),
       raw: messageStanza,
-    });
+    };
+    const originalAuthorAddress = fromFullAddress || fromDeviceId;
+    this.rememberMessageAuthor(roomId, emittedMessageId, originalAuthorAddress);
+    this.emit(this.messageListeners, message);
+    this.flushPendingRetraction(roomId, emittedMessageId, originalAuthorAddress);
     this.log("debug", "chat_message_received", {
       id: emittedMessageId,
       roomId,
@@ -2568,6 +2652,133 @@ class LulaChatClient implements ChatClient {
       }),
     });
     return parseUploadSlotResponse(stanza);
+  }
+
+  private rememberMessageAuthor(
+    roomId: string,
+    messageId: string,
+    authorAddress?: string | null,
+  ): void {
+    const normalizedRoomId = roomId.trim();
+    const normalizedMessageId = messageId.trim();
+    const normalizedAuthor = normalizeTransportAddress(authorAddress) ||
+      normalizeBareDeviceId(authorAddress);
+    if (!normalizedRoomId || !normalizedMessageId || !normalizedAuthor) return;
+
+    let roomAuthors = this.messageAuthorsByRoom.get(normalizedRoomId);
+    if (!roomAuthors) {
+      roomAuthors = new Map();
+      this.messageAuthorsByRoom.set(normalizedRoomId, roomAuthors);
+      while (this.messageAuthorsByRoom.size > MAX_RUNTIME_MESSAGE_AUTHOR_ROOMS) {
+        const oldestRoomId = this.messageAuthorsByRoom.keys().next().value;
+        if (!oldestRoomId) break;
+        this.messageAuthorsByRoom.delete(oldestRoomId);
+      }
+    }
+
+    roomAuthors.delete(normalizedMessageId);
+    roomAuthors.set(normalizedMessageId, normalizedAuthor);
+    while (roomAuthors.size > MAX_RUNTIME_MESSAGE_AUTHORS_PER_ROOM) {
+      const oldestMessageId = roomAuthors.keys().next().value;
+      if (!oldestMessageId) break;
+      roomAuthors.delete(oldestMessageId);
+    }
+  }
+
+  private queuePendingRetraction(event: ChatRetractionEvent): void {
+    let pending = this.pendingRetractionsByRoom.get(event.roomId);
+    if (!pending) {
+      pending = new Map();
+      this.pendingRetractionsByRoom.set(event.roomId, pending);
+      while (this.pendingRetractionsByRoom.size > MAX_PENDING_RETRACTION_ROOMS) {
+        const oldestRoomId = this.pendingRetractionsByRoom.keys().next().value;
+        if (!oldestRoomId) break;
+        this.pendingRetractionsByRoom.delete(oldestRoomId);
+      }
+    }
+
+    pending.delete(event.targetMessageId);
+    pending.set(event.targetMessageId, event);
+    while (pending.size > MAX_PENDING_RETRACTIONS_PER_ROOM) {
+      const oldestMessageId = pending.keys().next().value;
+      if (!oldestMessageId) break;
+      pending.delete(oldestMessageId);
+    }
+  }
+
+  private emitVerifiedRetraction(
+    event: ChatRetractionEvent,
+    originalAuthorAddress: string,
+  ): void {
+    if (!isRetractionAuthorized(event, originalAuthorAddress)) {
+      this.log("warn", "chat_message_retraction_rejected_author_mismatch", {
+        id: event.id,
+        targetMessageId: event.targetMessageId,
+        roomId: event.roomId,
+        retractionAuthor: event.fromFullAddress || event.fromDeviceId,
+        originalAuthor: originalAuthorAddress,
+      });
+      return;
+    }
+
+    this.emit(this.retractionListeners, event);
+    this.log("debug", "chat_message_retraction_received", {
+      id: event.id,
+      targetMessageId: event.targetMessageId,
+      roomId: event.roomId,
+      fromDeviceId: event.fromDeviceId,
+    });
+  }
+
+  private async processRetraction(event: ChatRetractionEvent): Promise<void> {
+    let originalAuthor = this.messageAuthorsByRoom
+      .get(event.roomId)
+      ?.get(event.targetMessageId);
+
+    if (!originalAuthor && this.config.resolveMessageAuthor) {
+      try {
+        originalAuthor = trimToUndefined(
+          await this.config.resolveMessageAuthor({
+            roomId: event.roomId,
+            messageId: event.targetMessageId,
+          }),
+        );
+      } catch (error) {
+        this.log("warn", "chat_message_retraction_author_lookup_failed", {
+          id: event.id,
+          targetMessageId: event.targetMessageId,
+          roomId: event.roomId,
+          error,
+        });
+      }
+    }
+
+    if (!originalAuthor) {
+      this.queuePendingRetraction(event);
+      this.log("warn", "chat_message_retraction_queued_unknown_original_author", {
+        id: event.id,
+        targetMessageId: event.targetMessageId,
+        roomId: event.roomId,
+      });
+      return;
+    }
+
+    this.rememberMessageAuthor(event.roomId, event.targetMessageId, originalAuthor);
+    this.emitVerifiedRetraction(event, originalAuthor);
+  }
+
+  private flushPendingRetraction(
+    roomId: string,
+    messageId: string,
+    originalAuthorAddress: string,
+  ): void {
+    const pending = this.pendingRetractionsByRoom.get(roomId);
+    const event = pending?.get(messageId);
+    if (!event) return;
+
+    pending?.delete(messageId);
+    if (pending?.size === 0) this.pendingRetractionsByRoom.delete(roomId);
+    this.emitVerifiedRetraction(event, originalAuthorAddress);
   }
 
   private emit<T>(listeners: Set<(event: T) => void>, event: T): void {
@@ -3109,6 +3320,7 @@ type NormalizedConfig = {
   connectTimeoutMs: number;
   roomDirectory?: ChatRoomDirectory;
   resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
+  resolveMessageAuthor?: ChatMessageAuthorResolver;
   logger?: ChatLogger;
   logLevel: ChatLogLevel;
   encryption?: ChatEncryption;
@@ -3148,6 +3360,7 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
     connectTimeoutMs: config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
     roomDirectory: config.roomDirectory,
     resolveRoomDeviceIds: config.resolveRoomDeviceIds,
+    resolveMessageAuthor: config.resolveMessageAuthor,
     logger: config.logger,
     logLevel: normalizeLogLevel(config.logLevel, config.logger),
     encryption: config.encryption,
