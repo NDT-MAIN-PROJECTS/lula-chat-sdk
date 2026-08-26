@@ -27,11 +27,13 @@ type ChatMessageType =
   | "CHAT_MESSAGE"
   | "FORM_SUBMISSION"
   | "CONVERSATION_STATE"
-  | "EMERGENCY";
+  | "EMERGENCY"
+  | "VOICE_MESSAGE";
 
 export const CHAT_CONVERSATION_STATE_MESSAGE_TYPE = "CONVERSATION_STATE" as const;
 export const CHAT_EMERGENCY_MESSAGE_TYPE = "EMERGENCY" as const;
 export const CHAT_EMERGENCY_TYPE_SOS = "sos" as const;
+export const CHAT_VOICE_MESSAGE_TYPE = "VOICE_MESSAGE" as const;
 
 export type ChatConversationState = "open" | "closed";
 
@@ -78,7 +80,8 @@ export type ChatMessageMetadata = Record<string, unknown> & {
     | "CHAT_MESSAGE"
     | "FORM_SUBMISSION"
     | typeof CHAT_CONVERSATION_STATE_MESSAGE_TYPE
-    | typeof CHAT_EMERGENCY_MESSAGE_TYPE;
+    | typeof CHAT_EMERGENCY_MESSAGE_TYPE
+    | typeof CHAT_VOICE_MESSAGE_TYPE;
   canonicalEventId?: string;
   replyTo?: ChatReplyReference;
   chatInteractionType?: typeof CHAT_REACTION_INTERACTION_TYPE;
@@ -89,6 +92,8 @@ export type ChatMessageMetadata = Record<string, unknown> & {
   emergencyType?: typeof CHAT_EMERGENCY_TYPE_SOS;
   emergencyAlertId?: string;
   emergencyTriggeredAt?: string;
+  voiceMessage?: boolean;
+  voiceDurationMs?: number;
 };
 
 export type ChatLogLevel = "silent" | "error" | "warn" | "info" | "debug";
@@ -223,6 +228,145 @@ export type ChatAttachmentService = {
     context: ChatAttachmentResolveContext,
   ) => Promise<string | null | undefined> | string | null | undefined;
 };
+
+/**
+ * Single source for how a voice message is recorded. Apps take their recorder
+ * settings from the two helpers below rather than hardcoding these values, so
+ * changing the encoding is an edit here instead of one per app.
+ *
+ * Only `mimeType`/`extension` decide whether a note is playable on another
+ * platform; the rest are consistency and payload size.
+ */
+export const CHAT_VOICE_SPEC = {
+  /** AAC-LC in MP4, the container every platform can play. */
+  mimeType: "audio/mp4",
+  /** The same container with the codec spelled out, as `MediaRecorder` wants it. */
+  codecMimeType: "audio/mp4;codecs=mp4a.40.2",
+  extension: "m4a",
+  sampleRate: 44100,
+  channels: 1,
+  bitsPerSecond: 128000,
+  /** Shorter than this is a mis-click, not a message. */
+  minDurationMs: 700,
+} as const;
+
+export type ChatVoiceRecorderWebOptions = {
+  /**
+   * `getUserMedia` constraints. Sample rate is absent on purpose: Chromium
+   * ignores it here and returns the device rate, so resample through an
+   * `AudioContext` pinned to `CHAT_VOICE_SPEC.sampleRate` and record that.
+   */
+  constraints: { audio: { channelCount: number } };
+  /** Options for the `MediaRecorder` constructor. */
+  recorder: { mimeType: string; audioBitsPerSecond: number };
+};
+
+/** Recorder settings for a browser or an Electron renderer. */
+export function getChatVoiceRecorderWebOptions(): ChatVoiceRecorderWebOptions {
+  return {
+    constraints: { audio: { channelCount: CHAT_VOICE_SPEC.channels } },
+    recorder: {
+      mimeType: CHAT_VOICE_SPEC.codecMimeType,
+      audioBitsPerSecond: CHAT_VOICE_SPEC.bitsPerSecond,
+    },
+  };
+}
+
+/**
+ * Structurally an `expo-audio` `RecordingOptions`, spelled out here so the SDK
+ * keeps no React Native dependency. Cast it if your expo-audio version types the
+ * iOS fields as enums.
+ */
+export type ChatVoiceRecorderExpoOptions = {
+  extension: string;
+  sampleRate: number;
+  numberOfChannels: number;
+  bitRate: number;
+  android: { outputFormat: string; audioEncoder: string };
+  ios: {
+    outputFormat: string;
+    audioQuality: number;
+    linearPCMBitDepth: number;
+    linearPCMIsBigEndian: boolean;
+    linearPCMIsFloat: boolean;
+  };
+};
+
+/**
+ * Recorder settings for React Native: expo-audio's `RecordingPresets.HIGH_QUALITY`
+ * with the channel count pinned to mono. Pass this rather than the preset, which
+ * is expo's constant and can change under an `expo-audio` upgrade.
+ */
+export function getChatVoiceRecorderExpoOptions(): ChatVoiceRecorderExpoOptions {
+  return {
+    extension: `.${CHAT_VOICE_SPEC.extension}`,
+    sampleRate: CHAT_VOICE_SPEC.sampleRate,
+    numberOfChannels: CHAT_VOICE_SPEC.channels,
+    bitRate: CHAT_VOICE_SPEC.bitsPerSecond,
+    android: { outputFormat: "mpeg4", audioEncoder: "aac" },
+    ios: {
+      // `IOSOutputFormat.MPEG4AAC` — a FourCC, trailing space included.
+      outputFormat: "aac ",
+      // `AudioQuality.MAX`.
+      audioQuality: 0x7f,
+      linearPCMBitDepth: 16,
+      linearPCMIsBigEndian: false,
+      linearPCMIsFloat: false,
+    },
+  };
+}
+
+const CHAT_AUDIO_EXTENSION_PATTERN = /\.(aac|caf|m4a|mp3|ogg|opus|wav|webm)$/i;
+
+/**
+ * Whether an attachment should render as a player. The file name is the fallback
+ * for a peer that uploaded without a content type. Wider than `CHAT_VOICE_SPEC`
+ * on purpose: it also covers audio a user attached rather than recorded.
+ */
+export function isChatAudioAttachment(attachment: {
+  mimeType?: string;
+  name?: string;
+}): boolean {
+  if (attachment.mimeType?.trim().toLowerCase().startsWith("audio/")) {
+    return true;
+  }
+  return CHAT_AUDIO_EXTENSION_PATTERN.test(String(attachment.name ?? ""));
+}
+
+/**
+ * The recorded length carried on a voice message, so a player can show a
+ * duration before the audio loads. Undefined unless the metadata marks the
+ * message as a voice note — either marker alone is enough, since a peer on an
+ * older build may send only one.
+ */
+export function getChatVoiceDurationMs(
+  metadata?: Record<string, unknown>,
+): number | undefined {
+  if (!metadata) {
+    return undefined;
+  }
+  if (metadata.voiceMessage !== true && metadata.messageType !== CHAT_VOICE_MESSAGE_TYPE) {
+    return undefined;
+  }
+  const value = metadata.voiceDurationMs;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/** Drop any codec parameter: `audio/mp4;codecs=mp4a.40.2` is `audio/mp4` on the wire. */
+function normalizeVoiceMimeType(value?: string): string {
+  return (value ?? "").split(";")[0].trim().toLowerCase();
+}
+
+/** Voice notes always end in the spec's extension — `isChatAudioAttachment` reads it. */
+function normalizeVoiceAttachmentName(name?: string): string {
+  const suffix = `.${CHAT_VOICE_SPEC.extension}`;
+  const trimmed = name?.trim();
+  if (trimmed && trimmed.toLowerCase().endsWith(suffix)) {
+    return trimmed;
+  }
+  const base = trimmed?.replace(/\.[^./\\]+$/, "").trim();
+  return `${base || `voice-${Date.now()}`}${suffix}`;
+}
 
 export type ChatClientBaseConfig = {
   /** API key for app access to the chat service. */
@@ -618,6 +762,20 @@ export type ChatAttachmentsMessageInput = Omit<
   body?: string;
 };
 
+/**
+ * A voice note is a one-attachment message with an empty body; the metadata is
+ * what makes the far end draw a player. `durationMs` is what the recorder
+ * measured, so a player can show a length before the audio arrives.
+ */
+export type ChatVoiceMessageInput = Omit<
+  ChatTextMessageInput,
+  "body" | "attachments" | "metadata"
+> & {
+  attachment: ChatAttachmentUpload;
+  durationMs: number;
+  metadata?: Record<string, unknown>;
+};
+
 export type ChatTypingInput = {
   roomId: string;
   targetScope?: ChatTargetScope;
@@ -826,6 +984,7 @@ export type ChatClient = {
       options?: Omit<ChatAttachmentsMessageInput, "roomId" | "attachments">,
     ): Promise<string>;
   };
+  sendVoiceMessage: (message: ChatVoiceMessageInput) => Promise<string>;
   /**
    * @deprecated Prefer sendChatMessage or sendFormSubmission for typed payloads.
    */
@@ -1479,6 +1638,55 @@ class LulaChatClient implements ChatClient {
       },
       "user",
     );
+  }
+
+  /**
+   * Send a recording as a voice message.
+   *
+   * Only container and duration are checked — they are the two things that can
+   * break a message. Sample rate, channels and bit rate do not affect playback,
+   * and the SDK is handed a file URI rather than bytes on React Native, so it
+   * could not read them back regardless; the recorder helpers above are what
+   * keep those aligned.
+   */
+  public async sendVoiceMessage(input: ChatVoiceMessageInput): Promise<string> {
+    const { attachment, durationMs, metadata: callerMetadata, ...message } = input;
+    if (!attachment) {
+      throw new Error("chat_attachment_required");
+    }
+    if (normalizeVoiceMimeType(attachment.mimeType) !== CHAT_VOICE_SPEC.mimeType) {
+      throw new Error("chat_voice_mime_type_invalid");
+    }
+    const roundedDurationMs = Math.round(durationMs);
+    if (
+      !Number.isFinite(roundedDurationMs) ||
+      roundedDurationMs < CHAT_VOICE_SPEC.minDurationMs
+    ) {
+      throw new Error("chat_voice_duration_too_short");
+    }
+
+    // A caller's own message type wins: an emergency recorded as a voice note is
+    // an EMERGENCY first, and `voiceMessage` is what still renders it as a player.
+    const voiceMetadata = {
+      voiceMessage: true,
+      voiceDurationMs: roundedDurationMs,
+      messageType: firstString(callerMetadata?.messageType) ?? CHAT_VOICE_MESSAGE_TYPE,
+    };
+
+    return this.sendAttachments({
+      ...message,
+      attachments: [
+        {
+          ...attachment,
+          name: normalizeVoiceAttachmentName(attachment.name),
+          // The codec parameter belongs to the recorder, not the wire.
+          mimeType: CHAT_VOICE_SPEC.mimeType,
+          metadata: { ...(attachment.metadata ?? {}), ...voiceMetadata },
+        },
+      ],
+      body: "",
+      metadata: { ...(callerMetadata ?? {}), ...voiceMetadata },
+    });
   }
 
   public async sendMessage(
@@ -3227,7 +3435,8 @@ function extractMessageType(metadata?: Record<string, unknown>): ChatMessageType
     rawType === "CHAT_MESSAGE" ||
     rawType === "FORM_SUBMISSION" ||
     rawType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE ||
-    rawType === CHAT_EMERGENCY_MESSAGE_TYPE
+    rawType === CHAT_EMERGENCY_MESSAGE_TYPE ||
+    rawType === CHAT_VOICE_MESSAGE_TYPE
   ) {
     return rawType;
   }
