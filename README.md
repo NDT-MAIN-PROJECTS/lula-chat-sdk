@@ -258,6 +258,7 @@ message bodies.
 - `onFormSubmission(listener)` for structured form submission payloads.
 - `onConversationState(listener)` for typed form-conversation open/closed control events. These events are not emitted by `onChatMessage()`.
 - `onThreadGone(listener)` for standard XEP-0085 `<gone/>` events keyed by the stanza `<thread>` value.
+- `onRetraction(listener)` for author-verified XEP-0424 message retractions.
 - `onEmergency(listener)` for typed SOS messages. Emergency messages are not emitted by `onChatMessage()`.
 - `onTyping(listener)` for composing and paused states.
 - `onDelivery(listener)` for delivered and read events.
@@ -273,6 +274,7 @@ message bodies.
 - `sendReply({ roomId, body, replyTo })` to send text with a typed reply reference.
 - `addReaction({ roomId, targetMessageId, emoji })` to add a reaction to a message.
 - `removeReaction({ roomId, targetMessageId, emoji })` to remove the current user's reaction.
+- `retractMessage({ roomId, messageId })` to retract a message using XEP-0424.
 - `uploadAttachment(roomId, attachment)` to upload a file or image through your attachment adapter.
 - `sendAttachment(roomId, attachment)` to upload and send one file or image into a room.
 - `sendAttachments(roomId, attachments, options)` to upload multiple files or images and send them in one room message with an optional `body` caption.
@@ -293,6 +295,27 @@ The SDK remembers room peers after sends and incoming room messages.
 Fanout treats partial delivery as success. It only throws after every target send fails.
 
 Incoming chat, form submission, typing, and delivery events include both `fromUserId` and `fromDeviceId`. Use `fromUserId` for app-user matching and `fromDeviceId` for device-level delivery or fanout logic.
+
+Incoming retractions are verified inside the SDK before `onRetraction` is
+emitted. The SDK validates messages observed during the current runtime and can
+query a client's persistent store through `resolveMessageAuthor`. Configure the
+resolver in every client that persists history so retractions received after a
+restart can be verified:
+
+```ts
+const chatClient = init({
+  // ...normal connection and encryption config
+  resolveMessageAuthor: async ({ roomId, messageId }) => {
+    const message = await messageStore.findByTransportId(roomId, messageId);
+    return message?.senderJid;
+  },
+});
+```
+
+The resolver must return the original sender's JID. If ownership cannot be
+established, the SDK queues the control event and does not emit an authoritative
+retraction. This fail-closed behavior applies equally to mobile, desktop,
+browser, connector, and other SDK consumers.
 
 During the conversation-state migration, sending a `closed` state also sends `<gone/>` on a best-effort basis so upgraded and legacy clients remain compatible. `<gone/>` is a client signal rather than server-side authorization; applications should retain durable closure state and enforce it when deciding whether a thread is writable.
 
