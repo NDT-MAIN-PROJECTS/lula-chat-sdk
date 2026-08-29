@@ -19,6 +19,33 @@ export type ChatStatus =
 
 export type ChatDeliveryStatus = "delivered" | "read";
 
+export type ChatDeliveryReceiptMode = "automatic" | "manual";
+
+export type ChatServerAcknowledgementEvent = {
+  /** The stable XMPP stanza id supplied by the sending client. */
+  id: string;
+  /** Logical chat room carried in the message thread, when present. */
+  roomId?: string;
+  /** XMPP target acknowledged as handled by the server. */
+  toDeviceId?: DeviceId;
+  acknowledgedAt: number;
+  raw?: unknown;
+};
+
+export type ChatServerSendFailureEvent = {
+  /** The stable XMPP stanza id supplied by the sending client. */
+  id: string;
+  roomId?: string;
+  toDeviceId?: DeviceId;
+  failedAt: number;
+  raw?: unknown;
+};
+
+export type ChatStreamManagementEvent = {
+  state: "enabled" | "resumed" | "failed";
+  resumable: boolean;
+};
+
 export type DeviceId = string;
 
 export type ChatTargetScope = "user" | "resource";
@@ -420,6 +447,33 @@ export type ChatClientBaseConfig = {
   /** Reconnect after transient connection loss. */
   autoReconnect?: boolean;
 
+  /**
+   * Controls when XEP-0184 delivery receipts are sent for incoming messages.
+   * "automatic" preserves the legacy receive-time acknowledgement. "manual"
+   * requires a consumer to call acknowledgeDelivered() after durable storage.
+   */
+  deliveryReceiptMode?: ChatDeliveryReceiptMode;
+
+  /**
+   * Fail connection readiness when XEP-0280 message carbons cannot be enabled.
+   * Durable multi-device clients should enable this to avoid partial histories.
+   */
+  requireMessageCarbons?: boolean;
+
+  /**
+   * Fail connection readiness unless XEP-0198 stream management was
+   * negotiated. Enable this for clients that use server acknowledgement as
+   * their durable-outbox acceptance boundary.
+   */
+  requireStreamManagement?: boolean;
+
+  /**
+   * Keep message send promises pending until ejabberd acknowledges every
+   * successfully written target stanza through XEP-0198. This is a
+   * server-acceptance acknowledgement, not an end-to-end delivery receipt.
+   */
+  awaitServerAcknowledgement?: boolean;
+
   /** Connection timeout in milliseconds. Defaults to 15000. */
   connectTimeoutMs?: number;
 
@@ -486,6 +540,21 @@ export type ChatMessage = {
   attachments?: ChatAttachment[];
   raw?: unknown;
 };
+
+export type ChatIncomingDeliveryContext = {
+  /** Whether this stanza requested an XEP-0184 delivery receipt. */
+  receiptRequested: boolean;
+  /**
+   * Idempotently acknowledges that the host client durably accepted the
+   * message. In manual mode this is the only operation that sends <received/>.
+   */
+  acknowledgeDelivered: () => Promise<void>;
+};
+
+export type ChatMessageListener = (
+  message: ChatMessage,
+  delivery: ChatIncomingDeliveryContext,
+) => void;
 
 export type ChatMessageContext = {
   providerDirectMessageRoomId?: string;
@@ -1045,17 +1114,36 @@ export type ChatClient = {
   /**
    * @deprecated Prefer onChatMessage or onFormSubmission for typed message payloads.
    */
-  onMessage: (listener: (message: ChatMessage) => void) => Unsubscribe;
-  onChatMessage: (listener: (message: ChatTextMessage) => void) => Unsubscribe;
-  onEmergency: (listener: (message: ChatEmergencyMessage) => void) => Unsubscribe;
-  onAttachmentMessage: (listener: (message: ChatAttachmentMessage) => void) => Unsubscribe;
-  onFormSubmission: (listener: (message: ChatFormSubmissionMessage) => void) => Unsubscribe;
-  onConversationState: (listener: (event: ChatConversationStateEvent) => void) => Unsubscribe;
+  onMessage: (listener: ChatMessageListener) => Unsubscribe;
+  onChatMessage: (
+    listener: (message: ChatTextMessage, delivery: ChatIncomingDeliveryContext) => void,
+  ) => Unsubscribe;
+  onEmergency: (
+    listener: (message: ChatEmergencyMessage, delivery: ChatIncomingDeliveryContext) => void,
+  ) => Unsubscribe;
+  onAttachmentMessage: (
+    listener: (message: ChatAttachmentMessage, delivery: ChatIncomingDeliveryContext) => void,
+  ) => Unsubscribe;
+  onFormSubmission: (
+    listener: (message: ChatFormSubmissionMessage, delivery: ChatIncomingDeliveryContext) => void,
+  ) => Unsubscribe;
+  onConversationState: (
+    listener: (event: ChatConversationStateEvent, delivery: ChatIncomingDeliveryContext) => void,
+  ) => Unsubscribe;
   onThreadGone: (listener: (event: ChatThreadGoneEvent) => void) => Unsubscribe;
   /** Emits only XEP-0424 retractions whose author was verified by the SDK. */
   onRetraction: (listener: (event: ChatRetractionEvent) => void) => Unsubscribe;
   onTyping: (listener: (event: ChatTypingEvent) => void) => Unsubscribe;
   onDelivery: (listener: (event: ChatDeliveryEvent) => void) => Unsubscribe;
+  onServerAcknowledged: (
+    listener: (event: ChatServerAcknowledgementEvent) => void,
+  ) => Unsubscribe;
+  onServerSendFailed: (
+    listener: (event: ChatServerSendFailureEvent) => void,
+  ) => Unsubscribe;
+  onStreamManagement: (
+    listener: (event: ChatStreamManagementEvent) => void,
+  ) => Unsubscribe;
   onError: (listener: (event: ChatErrorEvent) => void) => Unsubscribe;
   onStatus: (listener: (event: ChatStatusEvent) => void) => Unsubscribe;
   resolveAttachment: (attachment: ChatAttachment) => Promise<string | null>;
@@ -1072,6 +1160,7 @@ type XmppClientLike = ReturnType<typeof createXmppClient>;
 type XmppChild = ReturnType<typeof xml>;
 
 type XmppElementLike = {
+  name?: string;
   attrs?: Record<string, string>;
   is?: (name: string, ns?: string) => boolean;
   getChild?: (name: string, ns?: string) => XmppElementLike | null | undefined;
@@ -1079,6 +1168,21 @@ type XmppElementLike = {
   getChildText?: (name: string, ns?: string) => string | null | undefined;
   getText?: () => string;
   toString?: () => string;
+};
+
+type ServerAckWaiter = {
+  expectedTargets: Set<string>;
+  acknowledgedTargets: Set<string>;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: Error) => void;
+};
+
+type XmppStreamManagementLike = {
+  enabled?: boolean;
+  enableSent?: boolean;
+  id?: string;
+  on?: (event: "ack" | "fail" | "resumed", listener: (stanza?: XmppElementLike) => void) => void;
 };
 
 type PendingIq = {
@@ -1102,6 +1206,7 @@ const XMPP_FORWARD_NS = "urn:xmpp:forward:0";
 const XMPP_FALLBACK_NS = "urn:xmpp:fallback:0";
 const XMPP_HINTS_NS = "urn:xmpp:hints";
 const XMPP_RETRACT_NS = "urn:xmpp:message-retract:1";
+const XMPP_STREAM_MANAGEMENT_NS = "urn:xmpp:sm:3";
 export const XMPP_EMERGENCY_NS = "urn:lulafi:emergency:1" as const;
 const OMEMO_NS = "eu.siacs.conversations.axolotl";
 const OMEMO_DEVICELIST_NODE = "eu.siacs.conversations.axolotl.devicelist";
@@ -1275,7 +1380,7 @@ export function createRoomDirectory(options: ChatRoomDirectoryOptions): ChatRoom
 class LulaChatClient implements ChatClient {
   private readonly config: NormalizedConfig;
 
-  private readonly messageListeners = new Set<(message: ChatMessage) => void>();
+  private readonly messageListeners = new Set<ChatMessageListener>();
 
   private readonly typingListeners = new Set<(event: ChatTypingEvent) => void>();
 
@@ -1284,6 +1389,18 @@ class LulaChatClient implements ChatClient {
   private readonly retractionListeners = new Set<(event: ChatRetractionEvent) => void>();
 
   private readonly deliveryListeners = new Set<(event: ChatDeliveryEvent) => void>();
+
+  private readonly serverAcknowledgementListeners = new Set<
+    (event: ChatServerAcknowledgementEvent) => void
+  >();
+
+  private readonly serverSendFailureListeners = new Set<
+    (event: ChatServerSendFailureEvent) => void
+  >();
+
+  private readonly streamManagementListeners = new Set<
+    (event: ChatStreamManagementEvent) => void
+  >();
 
   private readonly errorListeners = new Set<(event: ChatErrorEvent) => void>();
 
@@ -1295,7 +1412,11 @@ class LulaChatClient implements ChatClient {
 
   private connectPromise: Promise<void> | null = null;
 
+  private onlineReadinessPromise: Promise<void> | null = null;
+
   private readonly pendingIqMap = new Map<string, PendingIq>();
+
+  private readonly serverAckWaiters = new Map<string, ServerAckWaiter>();
 
   private onlineDeviceId?: DeviceId;
 
@@ -1341,6 +1462,8 @@ class LulaChatClient implements ChatClient {
     const current = this.xmpp;
     this.xmpp = null;
     this.onlineDeviceId = undefined;
+    this.onlineReadinessPromise = null;
+    this.rejectServerAckWaiters(new Error("chat_client_stopped"));
     if (current) {
       await current.stop();
     }
@@ -1778,40 +1901,58 @@ class LulaChatClient implements ChatClient {
       messageType: metadata.messageType,
     });
 
-    await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
-      const encodedPayload = await this.encodePayload({
-        toDeviceId,
-        body: messageBody,
-        metadata,
-        attachments,
+    if (
+      this.config.awaitServerAcknowledgement &&
+      (xmpp.streamManagement as XmppStreamManagementLike).enabled !== true
+    ) {
+      throw new Error("chat_stream_management_unavailable");
+    }
+    const serverAckPromise = this.config.awaitServerAcknowledgement
+      ? this.createServerAckWaiter(id, targetDeviceIds)
+      : null;
+    try {
+      const sentTargets = await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
+        const encodedPayload = await this.encodePayload({
+          toDeviceId,
+          body: messageBody,
+          metadata,
+          attachments,
+        });
+        const children: XmppChild[] = [
+          xml("body", {}, encodedPayload.body ?? messageBody),
+          ...encodedPayload.children,
+        ];
+
+        if (roomId) children.push(xml("thread", {}, roomId));
+        const emergency = parseEmergencyMetadata(metadata);
+        if (emergency) {
+          children.push(
+            xml("emergency", {
+              xmlns: XMPP_EMERGENCY_NS,
+              type: emergency.emergencyType,
+              "alert-id": emergency.alertId,
+              "triggered-at": emergency.triggeredAt,
+            }),
+          );
+        }
+        if (metadata.messageType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE) {
+          children.push(xml("store", { xmlns: XMPP_HINTS_NS }));
+        }
+        if (input.requestReceipt !== false) {
+          children.push(xml("request", { xmlns: XMPP_RECEIPTS_NS }));
+          children.push(xml("markable", { xmlns: XMPP_CHAT_MARKERS_NS }));
+        }
+
+        await xmpp.send(xml("message", { to: toDeviceId, type: "chat", id }, ...children));
       });
-      const children: XmppChild[] = [
-        xml("body", {}, encodedPayload.body ?? messageBody),
-        ...encodedPayload.children,
-      ];
-
-      if (roomId) children.push(xml("thread", {}, roomId));
-      const emergency = parseEmergencyMetadata(metadata);
-      if (emergency) {
-        children.push(
-          xml("emergency", {
-            xmlns: XMPP_EMERGENCY_NS,
-            type: emergency.emergencyType,
-            "alert-id": emergency.alertId,
-            "triggered-at": emergency.triggeredAt,
-          }),
-        );
+      if (serverAckPromise) {
+        this.updateServerAckExpectedTargets(id, sentTargets);
+        await serverAckPromise;
       }
-      if (metadata.messageType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE) {
-        children.push(xml("store", { xmlns: XMPP_HINTS_NS }));
-      }
-      if (input.requestReceipt !== false) {
-        children.push(xml("request", { xmlns: XMPP_RECEIPTS_NS }));
-        children.push(xml("markable", { xmlns: XMPP_CHAT_MARKERS_NS }));
-      }
-
-      await xmpp.send(xml("message", { to: toDeviceId, type: "chat", id }, ...children));
-    });
+    } catch (error) {
+      this.cancelServerAckWaiter(id);
+      throw error;
+    }
     this.log("info", "chat_message_sent", {
       id,
       roomId,
@@ -1990,47 +2131,56 @@ class LulaChatClient implements ChatClient {
     return defaultAttachmentSource(normalized);
   }
 
-  public onMessage(listener: (message: ChatMessage) => void): Unsubscribe {
-    return addListener(this.messageListeners, listener);
+  public onMessage(listener: ChatMessageListener): Unsubscribe {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
   }
 
-  public onChatMessage(listener: (message: ChatTextMessage) => void): Unsubscribe {
-    return this.onMessage((message) => {
+  public onChatMessage(
+    listener: (message: ChatTextMessage, delivery: ChatIncomingDeliveryContext) => void,
+  ): Unsubscribe {
+    return this.onMessage((message, delivery) => {
       if (isConversationStateMessage(message)) return;
       if (isFormSubmissionMessage(message)) return;
       if (isAttachmentMessage(message)) return;
       if (isEmergencyMessage(message)) return;
-      listener(toChatTextMessage(message));
+      listener(toChatTextMessage(message), delivery);
     });
   }
 
-  public onEmergency(listener: (message: ChatEmergencyMessage) => void): Unsubscribe {
-    return this.onMessage((message) => {
+  public onEmergency(
+    listener: (message: ChatEmergencyMessage, delivery: ChatIncomingDeliveryContext) => void,
+  ): Unsubscribe {
+    return this.onMessage((message, delivery) => {
       const emergency = parseChatEmergencyMessage(message);
-      if (emergency) listener(emergency);
+      if (emergency) listener(emergency, delivery);
     });
   }
 
-  public onAttachmentMessage(listener: (message: ChatAttachmentMessage) => void): Unsubscribe {
-    return this.onMessage((message) => {
+  public onAttachmentMessage(
+    listener: (message: ChatAttachmentMessage, delivery: ChatIncomingDeliveryContext) => void,
+  ): Unsubscribe {
+    return this.onMessage((message, delivery) => {
       if (!isAttachmentMessage(message)) return;
-      listener(toChatAttachmentMessage(message));
+      listener(toChatAttachmentMessage(message), delivery);
     });
   }
 
-  public onFormSubmission(listener: (message: ChatFormSubmissionMessage) => void): Unsubscribe {
-    return this.onMessage((message) => {
+  public onFormSubmission(
+    listener: (message: ChatFormSubmissionMessage, delivery: ChatIncomingDeliveryContext) => void,
+  ): Unsubscribe {
+    return this.onMessage((message, delivery) => {
       const parsed = parseFormSubmissionMessage(message);
-      if (parsed) listener(parsed);
+      if (parsed) listener(parsed, delivery);
     });
   }
 
   public onConversationState(
-    listener: (event: ChatConversationStateEvent) => void,
+    listener: (event: ChatConversationStateEvent, delivery: ChatIncomingDeliveryContext) => void,
   ): Unsubscribe {
-    return this.onMessage((message) => {
+    return this.onMessage((message, delivery) => {
       const event = parseConversationStateMessage(message);
-      if (event) listener(event);
+      if (event) listener(event, delivery);
     });
   }
 
@@ -2048,6 +2198,24 @@ class LulaChatClient implements ChatClient {
 
   public onDelivery(listener: (event: ChatDeliveryEvent) => void): Unsubscribe {
     return addListener(this.deliveryListeners, listener);
+  }
+
+  public onServerAcknowledged(
+    listener: (event: ChatServerAcknowledgementEvent) => void,
+  ): Unsubscribe {
+    return addListener(this.serverAcknowledgementListeners, listener);
+  }
+
+  public onServerSendFailed(
+    listener: (event: ChatServerSendFailureEvent) => void,
+  ): Unsubscribe {
+    return addListener(this.serverSendFailureListeners, listener);
+  }
+
+  public onStreamManagement(
+    listener: (event: ChatStreamManagementEvent) => void,
+  ): Unsubscribe {
+    return addListener(this.streamManagementListeners, listener);
   }
 
   public onError(listener: (event: ChatErrorEvent) => void): Unsubscribe {
@@ -2122,12 +2290,22 @@ class LulaChatClient implements ChatClient {
       registerXOAuth2OnClient(xmpp);
     }
     this.bindXmppEvents(xmpp);
+    this.bindStreamManagementEvents(xmpp);
 
     try {
       await withTimeout(
         xmpp.start(),
         this.config.connectTimeoutMs,
         "chat_connect_timeout",
+      );
+      const onlineReadiness = this.onlineReadinessPromise;
+      if (!onlineReadiness) {
+        throw new Error("chat_online_readiness_missing");
+      }
+      await withTimeout(
+        onlineReadiness,
+        this.config.connectTimeoutMs,
+        "chat_online_readiness_timeout",
       );
     } catch (error) {
       this.xmpp = null;
@@ -2188,38 +2366,68 @@ class LulaChatClient implements ChatClient {
   }
 
   private bindXmppEvents(xmpp: XmppClientLike): void {
-    xmpp.on("online", async (address: unknown) => {
+    xmpp.on("online", (address: unknown) => {
       this.onlineDeviceId = addressToString(address) ?? this.config.deviceId;
-      this.setStatus("online");
-      this.log("info", "chat_online", {
-        deviceId: this.onlineDeviceId,
-        bareDeviceId: this.getBareDeviceId(),
-      });
-      await xmpp.send(xml("presence"));
-      try {
-        await this.enableMessageCarbons();
-        this.log("debug", "chat_carbons_enabled", {
+      this.onlineReadinessPromise = (async () => {
+        const streamManagement = xmpp.streamManagement as XmppStreamManagementLike;
+        const streamManagementRequired =
+          this.config.requireStreamManagement || this.config.awaitServerAcknowledgement;
+        // xmpp.js emits `online` from resource binding before the surrounding
+        // stream-feature middleware has completed XEP-0198 negotiation. A
+        // synchronous `enabled` check here therefore rejects capable servers.
+        // Wait for the actual <enabled/> result before declaring readiness.
+        const streamManagementEnabled = streamManagementRequired
+          ? await this.waitForStreamManagementNegotiation(xmpp)
+          : streamManagement.enabled === true;
+        if (streamManagementRequired && !streamManagementEnabled) {
+          throw new Error("chat_stream_management_required");
+        }
+        if (streamManagementEnabled) {
+          this.emit(this.streamManagementListeners, {
+            state: "enabled",
+            resumable: Boolean(streamManagement.id),
+          });
+        }
+        await xmpp.send(xml("presence"));
+        try {
+          await this.enableMessageCarbons();
+          this.log("debug", "chat_carbons_enabled", {
+            deviceId: this.onlineDeviceId,
+          });
+        } catch (error) {
+          this.log("warn", "chat_carbons_enable_failed", { error });
+          if (this.config.requireMessageCarbons) {
+            throw new Error("chat_carbons_required", { cause: error });
+          }
+        }
+        try {
+          await this.config.encryption?.onConnect?.(this.getEncryptionContext());
+          this.log("debug", "chat_encryption_connected", {
+            deviceId: this.getBareDeviceId(),
+          });
+        } catch (error) {
+          this.log("error", "chat_encryption_connect_failed", { error });
+          this.emit(this.errorListeners, { error });
+        }
+        this.setStatus("online");
+        this.log("info", "chat_online", {
           deviceId: this.onlineDeviceId,
+          bareDeviceId: this.getBareDeviceId(),
         });
-      } catch (error) {
-        this.log("warn", "chat_carbons_enable_failed", { error });
-      }
-      try {
-        await this.config.encryption?.onConnect?.(this.getEncryptionContext());
-        this.log("debug", "chat_encryption_connected", {
-          deviceId: this.getBareDeviceId(),
-        });
-      } catch (error) {
-        this.log("error", "chat_encryption_connect_failed", { error });
+      })();
+      this.onlineReadinessPromise.catch((error) => {
+        this.setStatus("error", error);
         this.emit(this.errorListeners, { error });
-      }
+      });
     });
 
     xmpp.on("offline", () => {
       this.setStatus("offline");
       this.onlineDeviceId = undefined;
+      this.onlineReadinessPromise = null;
       this.log("warn", "chat_offline");
       this.rejectPendingIq(new Error("chat_iq_offline"));
+      this.rejectServerAckWaiters(new Error("chat_stream_offline"));
     });
 
     xmpp.on("error", (error: unknown) => {
@@ -2240,6 +2448,169 @@ class LulaChatClient implements ChatClient {
       type: "set",
       payload: xml("enable", { xmlns: XMPP_CARBONS_NS }),
     });
+  }
+
+  private async waitForStreamManagementNegotiation(xmpp: XmppClientLike): Promise<boolean> {
+    const streamManagement = xmpp.streamManagement as XmppStreamManagementLike;
+    if (streamManagement.enabled === true) return true;
+
+    const timeoutMs = Math.max(250, Math.min(this.config.connectTimeoutMs, 10_000));
+    this.log("debug", "chat_stream_management_negotiation_wait", {
+      timeoutMs,
+      enableSent: streamManagement.enableSent === true,
+    });
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let pollTimer: ReturnType<typeof setInterval> | undefined;
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const cleanup = () => {
+        if (pollTimer) clearInterval(pollTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        xmpp.removeListener("element", onElement);
+        xmpp.removeListener("offline", onOffline);
+      };
+      const finish = (enabled: boolean) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.log(enabled ? "debug" : "warn", "chat_stream_management_negotiation_complete", {
+          enabled,
+          enableSent: streamManagement.enableSent === true,
+          resumable: Boolean(streamManagement.id),
+        });
+        resolve(enabled);
+      };
+      const checkEnabled = () => {
+        if (streamManagement.enabled === true) finish(true);
+      };
+      const onElement = (element: XmppElementLike) => {
+        if (element.is?.("failed", XMPP_STREAM_MANAGEMENT_NS)) {
+          finish(false);
+          return;
+        }
+        // The stream-management plugin sets `enabled` in its own continuation
+        // after receiving <enabled/>. Polling bridges that short async gap.
+        if (element.is?.("enabled", XMPP_STREAM_MANAGEMENT_NS)) {
+          queueMicrotask(checkEnabled);
+        }
+      };
+      const onOffline = () => finish(false);
+
+      xmpp.on("element", onElement);
+      xmpp.on("offline", onOffline);
+      pollTimer = setInterval(checkEnabled, 10);
+      timeoutTimer = setTimeout(() => finish(streamManagement.enabled === true), timeoutMs);
+      checkEnabled();
+    });
+  }
+
+  private bindStreamManagementEvents(xmpp: XmppClientLike): void {
+    const streamManagement = xmpp.streamManagement as XmppStreamManagementLike;
+    streamManagement.on?.("ack", (stanza) => {
+      if (!stanza || (!stanza.is?.("message") && stanza.name !== "message")) return;
+      const id = trimToUndefined(stanza.attrs?.id);
+      if (!id) return;
+      const target = normalizeTransportAddress(stanza.attrs?.to);
+      const waiter = this.serverAckWaiters.get(id);
+      if (waiter && target) {
+        waiter.acknowledgedTargets.add(target);
+        this.resolveServerAckWaiterIfComplete(id, waiter);
+      }
+      this.emit(this.serverAcknowledgementListeners, {
+        id,
+        acknowledgedAt: Date.now(),
+        ...(target ? { toDeviceId: target } : {}),
+        ...(trimToUndefined(stanza.getChildText?.("thread"))
+          ? { roomId: trimToUndefined(stanza.getChildText?.("thread")) }
+          : {}),
+        raw: stanza,
+      });
+    });
+    streamManagement.on?.("fail", (stanza) => {
+      if (!stanza || (!stanza.is?.("message") && stanza.name !== "message")) return;
+      const id = trimToUndefined(stanza.attrs?.id);
+      if (!id) return;
+      const waiter = this.serverAckWaiters.get(id);
+      if (waiter) {
+        this.serverAckWaiters.delete(id);
+        waiter.reject(new Error(`chat_server_ack_failed:${id}`));
+      }
+      const target = normalizeTransportAddress(stanza.attrs?.to);
+      this.emit(this.serverSendFailureListeners, {
+        id,
+        failedAt: Date.now(),
+        ...(target ? { toDeviceId: target } : {}),
+        ...(trimToUndefined(stanza.getChildText?.("thread"))
+          ? { roomId: trimToUndefined(stanza.getChildText?.("thread")) }
+          : {}),
+        raw: stanza,
+      });
+      this.emit(this.streamManagementListeners, {
+        state: "failed",
+        resumable: false,
+      });
+    });
+    streamManagement.on?.("resumed", () => {
+      this.setStatus("online");
+      this.emit(this.streamManagementListeners, {
+        state: "resumed",
+        resumable: true,
+      });
+      this.log("info", "chat_stream_resumed");
+    });
+  }
+
+  private createServerAckWaiter(messageId: string, targets: string[]): Promise<void> {
+    this.cancelServerAckWaiter(messageId);
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    // A stream failure can arrive while a multi-target send is still awaiting
+    // its remaining writes. Attach a handler immediately so rejection cannot
+    // be reported as unhandled before sendMessageInput awaits the promise.
+    promise.catch(() => {});
+    this.serverAckWaiters.set(messageId, {
+      expectedTargets: new Set(normalizeTransportAddressList(targets)),
+      acknowledgedTargets: new Set<string>(),
+      promise,
+      resolve,
+      reject,
+    });
+    return promise;
+  }
+
+  private updateServerAckExpectedTargets(messageId: string, targets: string[]): void {
+    const waiter = this.serverAckWaiters.get(messageId);
+    if (!waiter) return;
+    waiter.expectedTargets = new Set(normalizeTransportAddressList(targets));
+    this.resolveServerAckWaiterIfComplete(messageId, waiter);
+  }
+
+  private resolveServerAckWaiterIfComplete(messageId: string, waiter: ServerAckWaiter): void {
+    if (!waiter.expectedTargets.size) return;
+    const complete = Array.from(waiter.expectedTargets).every((target) =>
+      waiter.acknowledgedTargets.has(target),
+    );
+    if (!complete) return;
+    this.serverAckWaiters.delete(messageId);
+    waiter.resolve();
+  }
+
+  private cancelServerAckWaiter(messageId: string): void {
+    const waiter = this.serverAckWaiters.get(messageId);
+    if (!waiter) return;
+    this.serverAckWaiters.delete(messageId);
+    waiter.reject(new Error(`chat_server_ack_cancelled:${messageId}`));
+  }
+
+  private rejectServerAckWaiters(error: Error): void {
+    const waiters = Array.from(this.serverAckWaiters.values());
+    this.serverAckWaiters.clear();
+    waiters.forEach((waiter) => waiter.reject(error));
   }
 
   private unwrapCarbonMessage(stanza: XmppElementLike): CarbonForwardedMessage | null {
@@ -2480,14 +2851,48 @@ class LulaChatClient implements ChatClient {
       toDeviceId,
       roomId,
       body,
-      timestamp: parseDelayTimestamp(messageStanza) ?? parseMetadataTimestamp(metadata) ?? Date.now(),
+      // Prefer the sender's original timestamp. Offline queues and reconnect
+      // delivery can emit stanzas in a different order, while sentAtMs stays
+      // attached to the stable message id across retries.
+      timestamp: parseMetadataTimestamp(metadata) ?? parseDelayTimestamp(messageStanza) ?? Date.now(),
       metadata,
       ...(attachments?.length ? { attachments } : {}),
       raw: messageStanza,
     };
     const originalAuthorAddress = fromFullAddress || fromDeviceId;
+    const receiptRequest = messageStanza.getChild?.("request", XMPP_RECEIPTS_NS);
+    const receiptRequested = Boolean(!carbon && attrs.id && receiptRequest && fromDeviceId);
+    let receiptSent = false;
+    let receiptPromise: Promise<void> | null = null;
+    const delivery: ChatIncomingDeliveryContext = {
+      receiptRequested,
+      acknowledgeDelivered: async () => {
+        if (!receiptRequested || receiptSent) return;
+        if (!receiptPromise) {
+          receiptPromise = this.sendReceipt({
+            toDeviceId: fromDeviceId,
+            roomId,
+            messageId: attrs.id!,
+          }).then(() => {
+            receiptSent = true;
+            this.log("debug", "chat_delivery_receipt_sent", {
+              id: attrs.id,
+              roomId,
+              toDeviceId: fromDeviceId,
+              mode: this.config.deliveryReceiptMode,
+            });
+          });
+        }
+        try {
+          await receiptPromise;
+        } catch (error) {
+          receiptPromise = null;
+          throw error;
+        }
+      },
+    };
     this.rememberMessageAuthor(roomId, emittedMessageId, originalAuthorAddress);
-    this.emit(this.messageListeners, message);
+    this.emitMessage(message, delivery);
     this.flushPendingRetraction(roomId, emittedMessageId, originalAuthorAddress);
     this.log("debug", "chat_message_received", {
       id: emittedMessageId,
@@ -2497,9 +2902,8 @@ class LulaChatClient implements ChatClient {
       hasAttachments: Boolean(attachments?.length),
     });
 
-    const receiptRequest = messageStanza.getChild?.("request", XMPP_RECEIPTS_NS);
-    if (!carbon && attrs.id && receiptRequest && fromDeviceId) {
-      await this.sendReceipt({ toDeviceId: fromDeviceId, roomId, messageId: attrs.id });
+    if (this.config.deliveryReceiptMode === "automatic") {
+      await delivery.acknowledgeDelivered();
     }
   }
 
@@ -2654,7 +3058,7 @@ class LulaChatClient implements ChatClient {
   private async sendToTargets(
     targetDeviceIds: string[],
     send: (targetDeviceId: string) => Promise<unknown>,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const targets = normalizeTransportAddressList(targetDeviceIds);
     if (!targets.length) throw new Error("chat_targets_required");
 
@@ -2662,14 +3066,17 @@ class LulaChatClient implements ChatClient {
       targets.map(async (targetDeviceId) => {
         try {
           await send(targetDeviceId);
-          return { ok: true as const };
+          return { ok: true as const, targetDeviceId };
         } catch (error) {
           this.log("warn", "chat_target_send_failed", { targetDeviceId, error });
           return { ok: false as const, error };
         }
       }),
     );
-    if (results.some((result) => result.ok)) return;
+    const successfulTargets = results
+      .filter((result): result is { ok: true; targetDeviceId: string } => result.ok)
+      .map((result) => result.targetDeviceId);
+    if (successfulTargets.length) return successfulTargets;
     throw results.find((result) => !result.ok)?.error ?? new Error("chat_send_failed");
   }
 
@@ -2993,6 +3400,16 @@ class LulaChatClient implements ChatClient {
     for (const listener of Array.from(listeners)) {
       try {
         listener(event);
+      } catch (error) {
+        this.log("error", "chat_listener_error", { error });
+      }
+    }
+  }
+
+  private emitMessage(message: ChatMessage, delivery: ChatIncomingDeliveryContext): void {
+    for (const listener of Array.from(this.messageListeners)) {
+      try {
+        listener(message, delivery);
       } catch (error) {
         this.log("error", "chat_listener_error", { error });
       }
@@ -3526,6 +3943,10 @@ type NormalizedConfig = {
   domain: string;
   resource: string;
   connectTimeoutMs: number;
+  deliveryReceiptMode: ChatDeliveryReceiptMode;
+  requireMessageCarbons: boolean;
+  requireStreamManagement: boolean;
+  awaitServerAcknowledgement: boolean;
   roomDirectory?: ChatRoomDirectory;
   resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
   resolveMessageAuthor?: ChatMessageAuthorResolver;
@@ -3566,6 +3987,10 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
     domain,
     resource,
     connectTimeoutMs: config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+    deliveryReceiptMode: config.deliveryReceiptMode ?? "automatic",
+    requireMessageCarbons: config.requireMessageCarbons ?? false,
+    requireStreamManagement: config.requireStreamManagement ?? false,
+    awaitServerAcknowledgement: config.awaitServerAcknowledgement ?? false,
     roomDirectory: config.roomDirectory,
     resolveRoomDeviceIds: config.resolveRoomDeviceIds,
     resolveMessageAuthor: config.resolveMessageAuthor,

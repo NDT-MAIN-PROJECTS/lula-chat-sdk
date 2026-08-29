@@ -213,6 +213,64 @@ The SDK connects to `wss://api.dev.lulafi.co/chat/websocket`.
 The SDK binds the local `deviceId` as the XMPP resource by default. A device
 with `userId: "u1"` and `deviceId: "d1"` connects as `i.u1@<domain>/d1`.
 
+### Durable delivery receipts
+
+Clients that persist chat history should opt into manual XEP-0184 receipts and
+acknowledge only after their local transaction commits:
+
+```ts
+const chatClient = init({
+  // ...authentication, encryption, and room configuration
+  deliveryReceiptMode: "manual",
+  requireMessageCarbons: true,
+});
+
+chatClient.onChatMessage(async (message, delivery) => {
+  await messageStore.upsert(message); // must be durable when this resolves
+  await delivery.acknowledgeDelivered();
+});
+```
+
+`acknowledgeDelivered()` is idempotent. If persistence fails, do not call it;
+the sender can retry the same stable message id. `deliveryReceiptMode` defaults
+to `"automatic"` for compatibility with consumers that do not maintain a
+durable message store. `requireMessageCarbons` defaults to `false`; multi-device
+clients should enable it so the connection is not reported ready with partial
+XEP-0280 coverage.
+
+### XEP-0198 server acceptance and durable outboxes
+
+Clients with a durable outbox can use ejabberd's stream-management
+acknowledgement as the point where a staged message no longer needs app-level
+retransmission:
+
+```ts
+const chatClient = init({
+  // ...authentication, encryption, and room configuration
+  requireStreamManagement: true,
+  awaitServerAcknowledgement: true,
+});
+
+await durableOutbox.stage(message); // persist before touching the network
+try {
+  await chatClient.sendChatMessage(message); // resolves after XEP-0198 ack
+  await durableOutbox.remove(message.id);
+} catch (error) {
+  await durableOutbox.keepForRetry(message.id, error);
+}
+```
+
+During a resumable disconnect, xmpp.js replays only stanzas that ejabberd has
+not acknowledged; an app-level timer must not send the same in-flight entry at
+the same time. The durable outbox is still required for process termination,
+because XEP-0198 stream state is in memory. After a cold start, retry the same
+stable stanza id so receiving clients can apply idempotent persistence.
+
+`onServerAcknowledged`, `onServerSendFailed`, and `onStreamManagement` are
+available for observability in every SDK consumer. XEP-0198 proves server
+acceptance only. Continue to use XEP-0184 for recipient delivery and chat
+markers for read state.
+
 ## Manual XMPP Test Clients
 
 Use `test-client.html` for a browser test:
