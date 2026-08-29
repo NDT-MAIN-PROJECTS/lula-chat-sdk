@@ -90,6 +90,41 @@ onEmergency((message) => {
 
 await connect();
 
+// Native XEP-0045 group chat. The API remains authoritative for membership;
+// the SDK uses the same bare-JID snapshot to encrypt one XEP-0384 payload for
+// every member device before sending one groupchat stanza to the MUC service.
+await chatClient.joinGroupRoom({
+  roomId: "lg_66d1859f61d9cac92544fac9",
+  mucJid: "g_66d1859f61d9cac92544fac9@conference.api.dev.lulafi.co",
+  memberJids: [ownAddress.address, peerUserId],
+});
+
+await sendChatMessage({
+  roomId: "lg_66d1859f61d9cac92544fac9",
+  body: "Hello group",
+});
+
+// Call updateGroupRoom after an API membership change and leaveGroupRoom when
+// the current user leaves. Registered rooms are automatically rejoined after
+// reconnect, with bounded retries for transient join failures and a separate
+// MUC occupant for each connected XMPP resource.
+await chatClient.updateGroupRoom({
+  roomId: "lg_66d1859f61d9cac92544fac9",
+  mucJid: "g_66d1859f61d9cac92544fac9@conference.api.dev.lulafi.co",
+  memberJids: [ownAddress.address, peerUserId],
+});
+
+// Applications can use native XEP-0045/XEP-0249 invitations as a prompt to
+// refresh authoritative membership and join a newly assigned room immediately.
+const unsubscribeInvitation = chatClient.onGroupInvitation(({ mucJid }) => {
+  void refreshGroupRoomAndJoin(mucJid);
+});
+
+// XEP-0045 delivery is presence-based. This SDK rejoins registered rooms after
+// reconnect but does not fetch history. Deployments that require recovery after
+// a fully terminated session must add an explicit server-side archive policy
+// (for example MUC/Sub plus MAM) and a matching client history query.
+
 const room = await chatClient.getOrCreateRoom("peer-user-id");
 
 await sendChatMessage(room.roomId, "Hello");
@@ -310,6 +345,10 @@ message bodies.
 - `connect()` to open the chat connection.
 - `stop()` to close the stream.
 - `getOrCreateRoom(userId)` to fetch the room your backend owns for that peer.
+- `joinGroupRoom({ roomId, mucJid, memberJids })` to join and register a native XEP-0045 room.
+- `updateGroupRoom({ roomId, mucJid, memberJids })` after the authoritative membership changes.
+- `leaveGroupRoom(roomId)` to send unavailable presence and unregister the room locally.
+- `onGroupInvitation(listener)` for XEP-0045 mediated and XEP-0249 direct MUC invitations.
 - `onMessage(listener)` for raw chat messages. Deprecated. Prefer `onChatMessage()` or `onFormSubmission()`.
 - `onChatMessage(listener)` for human chat messages.
 - `onAttachmentMessage(listener)` for attachment messages.
@@ -346,13 +385,13 @@ message bodies.
 - `markRead(roomId, messageId)` for read markers.
 - `resolveAttachment(attachment)` to turn an attachment into a local or remote source string.
 
-The SDK resolves room device IDs inside sends, attachments, typing events, and read markers. Pass `roomDirectory` in `init()` for the normal fanout path.
+The SDK resolves room transport addresses inside sends, attachments, typing events, and read markers. Pass `roomDirectory` in `init()` for normal direct-chat routing.
 
 The SDK remembers room peers after sends and incoming room messages.
 
-Fanout treats partial delivery as success. It only throws after every target send fails.
+The legacy multi-target compatibility path treats partial delivery as success. Native MUC sends one stanza to the room and uses XEP-0198 acknowledgement as its server-acceptance boundary.
 
-Incoming chat, form submission, typing, and delivery events include both `fromUserId` and `fromDeviceId`. Use `fromUserId` for app-user matching and `fromDeviceId` for device-level delivery or fanout logic.
+Incoming chat, form submission, typing, and delivery events include both `fromUserId` and `fromDeviceId`. Use `fromUserId` for app-user matching and `fromDeviceId` for device-level diagnostics.
 
 Incoming retractions are verified inside the SDK before `onRetraction` is
 emitted. The SDK validates messages observed during the current runtime and can
@@ -400,7 +439,7 @@ const chatClient = init({
 
 `createRoomDirectory()` reads `roomId`, `peerDeviceId`, `peerDeviceIds`, `deviceId`, `deviceIds`, and `userMetadata[].deviceIds` from your room response. It can turn short device tokens into transport addresses with `xmppDomain` and each room user id. Typed chat APIs collapse those candidates to one bare JID per user.
 
-`resolveRoomDeviceIds` still works as a fallback room fanout provider. New code should prefer `roomDirectory`.
+`resolveRoomDeviceIds` still works as a fallback room-routing provider. New code should prefer `roomDirectory`.
 
 The SDK client exposes `getPeerDeviceIds(roomId)`. That gives app code one method to inspect candidates from cache, incoming messages, or a configured provider.
 
@@ -550,7 +589,7 @@ normalizes each account address to a bare JID, reads the
 identity bundle for each numeric OMEMO device id. It performs this discovery
 for the recipient and for the sender's own account so carbon copies can be
 decrypted by the sender's other clients. Applications do not provide XMPP
-resources or device fanout lists for normal chat messages.
+resources or per-resource recipient lists for normal chat messages.
 
 ```ts
 import { createOmemoEncryption, init, storageBackends } from "@hubnet-systems/chat-sdk";

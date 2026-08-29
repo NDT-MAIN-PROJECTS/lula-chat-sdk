@@ -172,6 +172,26 @@ export type ChatRoom = {
   raw?: unknown;
 };
 
+/**
+ * A native XEP-0045 room. `memberJids` is the current authoritative membership
+ * snapshot used to build the XEP-0384 OMEMO recipient set.
+ */
+export type ChatGroupRoom = {
+  roomId: string;
+  mucJid: string;
+  memberJids: DeviceId[];
+  nickname?: string;
+};
+
+export type ChatGroupInvitationEvent = {
+  /** Bare MUC JID supplied by an XEP-0249 or XEP-0045 invitation. */
+  mucJid: string;
+  fromJid?: string;
+  reason?: string;
+  password?: string;
+  raw?: unknown;
+};
+
 export type ChatRoomDirectoryOptions = {
   currentUserId?: string;
   xmppDomain?: string;
@@ -477,10 +497,10 @@ export type ChatClientBaseConfig = {
   /** Connection timeout in milliseconds. Defaults to 15000. */
   connectTimeoutMs?: number;
 
-  /** Room lookup provider used to resolve peer devices for fanout. */
+  /** Room lookup provider used to resolve peer transport addresses. */
   roomDirectory?: ChatRoomDirectory;
 
-  /** Fallback resolver for older room fanout call sites. Prefer roomDirectory. */
+  /** Fallback resolver for older room-routing call sites. Prefer roomDirectory. */
   resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
 
   /**
@@ -995,6 +1015,8 @@ export type CreateDeviceIdOptions = {
 
 export type ChatEncryptInput = {
   toDeviceId: DeviceId;
+  /** All bare-JID recipients for a single encrypted groupchat stanza. */
+  recipientJids?: DeviceId[];
   body: string;
   metadata: ChatMessageMetadata;
   attachments?: ChatAttachment[];
@@ -1047,6 +1069,9 @@ export type OmemoEncryptionOptions = {
 export type ChatClient = {
   connect: () => Promise<void>;
   stop: () => Promise<void>;
+  joinGroupRoom: (room: ChatGroupRoom) => Promise<void>;
+  leaveGroupRoom: (roomId: string) => Promise<void>;
+  updateGroupRoom: (room: ChatGroupRoom) => Promise<void>;
   getOrCreateRoom: {
     (userId: string, metadata?: Record<string, unknown>): Promise<ChatRoom>;
     (input: ChatRoomLookupInput): Promise<ChatRoom>;
@@ -1130,6 +1155,7 @@ export type ChatClient = {
   onConversationState: (
     listener: (event: ChatConversationStateEvent, delivery: ChatIncomingDeliveryContext) => void,
   ) => Unsubscribe;
+  onGroupInvitation: (listener: (event: ChatGroupInvitationEvent) => void) => Unsubscribe;
   onThreadGone: (listener: (event: ChatThreadGoneEvent) => void) => Unsubscribe;
   /** Emits only XEP-0424 retractions whose author was verified by the SDK. */
   onRetraction: (listener: (event: ChatRetractionEvent) => void) => Unsubscribe;
@@ -1191,6 +1217,13 @@ type PendingIq = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
+type PendingGroupJoin = {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
 type CarbonForwardedMessage = {
   direction: "sent" | "received";
   message: XmppElementLike;
@@ -1207,6 +1240,9 @@ const XMPP_FALLBACK_NS = "urn:xmpp:fallback:0";
 const XMPP_HINTS_NS = "urn:xmpp:hints";
 const XMPP_RETRACT_NS = "urn:xmpp:message-retract:1";
 const XMPP_STREAM_MANAGEMENT_NS = "urn:xmpp:sm:3";
+const XMPP_MUC_NS = "http://jabber.org/protocol/muc";
+const XMPP_MUC_USER_NS = "http://jabber.org/protocol/muc#user";
+const XMPP_DIRECT_MUC_INVITE_NS = "jabber:x:conference";
 export const XMPP_EMERGENCY_NS = "urn:lulafi:emergency:1" as const;
 const OMEMO_NS = "eu.siacs.conversations.axolotl";
 const OMEMO_DEVICELIST_NODE = "eu.siacs.conversations.axolotl.devicelist";
@@ -1220,6 +1256,8 @@ const PUBSUB_NS = "http://jabber.org/protocol/pubsub";
 const XDATA_NS = "jabber:x:data";
 const DEFAULT_CONNECT_TIMEOUT_MS = 15000;
 const DEFAULT_IQ_TIMEOUT_MS = 15000;
+const DEFAULT_MUC_JOIN_TIMEOUT_MS = 15000;
+const MUC_JOIN_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000, 16000] as const;
 const OMEMO_IQ_TIMEOUT_MS = 10000;
 const OMEMO_IQ_MAX_ATTEMPTS = 3;
 const OMEMO_IQ_RETRY_DELAY_MS = 250;
@@ -1366,7 +1404,7 @@ export function createRoomDirectory(options: ChatRoomDirectoryOptions): ChatRoom
 
       if (!options.getRoom) return [];
       const room = normalizeChatRoomResponse(await options.getRoom(normalizedRoomId), options);
-      return deriveFanoutDeviceIds(room);
+      return deriveRoomDeviceIds(room);
     },
     getOrCreateRoom: options.getOrCreateRoom
       ? async (input) => {
@@ -1381,6 +1419,10 @@ class LulaChatClient implements ChatClient {
   private readonly config: NormalizedConfig;
 
   private readonly messageListeners = new Set<ChatMessageListener>();
+
+  private readonly groupInvitationListeners = new Set<
+    (event: ChatGroupInvitationEvent) => void
+  >();
 
   private readonly typingListeners = new Set<(event: ChatTypingEvent) => void>();
 
@@ -1415,6 +1457,23 @@ class LulaChatClient implements ChatClient {
   private onlineReadinessPromise: Promise<void> | null = null;
 
   private readonly pendingIqMap = new Map<string, PendingIq>();
+
+  private readonly groupRooms = new Map<string, ChatGroupRoom>();
+
+  private readonly groupRoomIdsByMucJid = new Map<string, string>();
+
+  private readonly joinedGroupRooms = new Set<string>();
+
+  private readonly mucOccupantRealJids = new Map<string, string>();
+
+  private readonly pendingGroupJoins = new Map<string, PendingGroupJoin>();
+
+  private readonly groupJoinRetryTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+
+  private readonly groupJoinRetryAttempts = new Map<string, number>();
 
   private readonly serverAckWaiters = new Map<string, ServerAckWaiter>();
 
@@ -1463,12 +1522,61 @@ class LulaChatClient implements ChatClient {
     this.xmpp = null;
     this.onlineDeviceId = undefined;
     this.onlineReadinessPromise = null;
+    this.joinedGroupRooms.clear();
+    this.mucOccupantRealJids.clear();
+    this.clearAllGroupJoinRetries();
+    this.rejectPendingGroupJoins(new Error("chat_client_stopped"));
     this.rejectServerAckWaiters(new Error("chat_client_stopped"));
     if (current) {
       await current.stop();
     }
     this.setStatus("offline");
     this.log("info", "chat_stopped");
+  }
+
+  public async joinGroupRoom(room: ChatGroupRoom): Promise<void> {
+    const normalized = this.normalizeGroupRoom(room);
+    this.rememberGroupRoom(normalized);
+    try {
+      await this.connect();
+      await this.ensureGroupRoomJoined(normalized.roomId);
+    } catch (error) {
+      this.scheduleGroupJoinRetry(normalized.roomId);
+      throw error;
+    }
+  }
+
+  public async updateGroupRoom(room: ChatGroupRoom): Promise<void> {
+    const normalized = this.normalizeGroupRoom(room);
+    this.rememberGroupRoom(normalized);
+    if (this.status === "online") {
+      try {
+        await this.ensureGroupRoomJoined(normalized.roomId);
+      } catch (error) {
+        this.scheduleGroupJoinRetry(normalized.roomId);
+        throw error;
+      }
+    }
+  }
+
+  public async leaveGroupRoom(roomId: string): Promise<void> {
+    const normalizedRoomId = roomId.trim();
+    if (!normalizedRoomId) throw new Error("chat_room_id_required");
+    const room = this.groupRooms.get(normalizedRoomId);
+    if (!room) return;
+
+    if (this.xmpp && this.joinedGroupRooms.has(normalizedRoomId)) {
+      await this.xmpp.send(
+        xml("presence", {
+          to: `${room.mucJid}/${this.getGroupNickname(room)}`,
+          type: "unavailable",
+        }),
+      );
+    }
+    this.joinedGroupRooms.delete(normalizedRoomId);
+    this.clearGroupJoinRetry(normalizedRoomId);
+    this.groupRooms.delete(normalizedRoomId);
+    this.groupRoomIdsByMucJid.delete(normalizeBareDeviceId(room.mucJid));
   }
 
   public async getPeerDeviceIds(roomId: string): Promise<DeviceId[]> {
@@ -1577,17 +1685,28 @@ class LulaChatClient implements ChatClient {
     const id = input.id || `retract-${generateMessageId()}`;
     const targetRoomId = input.targetRoomId?.trim() || roomId;
     const targetScope = input.targetScope ?? "user";
-    const targetDeviceIds = await this.resolveRoomTargets({
-      roomId: targetRoomId,
-      explicitDeviceIds: collectTargetDeviceIds(input),
-      targetScope,
-    });
+    const groupRoom =
+      this.getGroupRoomForTransport(targetRoomId) ??
+      this.getGroupRoomForTransport(roomId);
+    if (groupRoom) {
+      await this.ensureGroupRoomJoined(groupRoom.roomId);
+    }
+    const targetDeviceIds = groupRoom
+      ? [groupRoom.mucJid]
+      : await this.resolveRoomTargets({
+          roomId: targetRoomId,
+          explicitDeviceIds: collectTargetDeviceIds(input),
+          targetScope,
+        });
     const fallbackBody = "/me retracted a previous message.";
     const metadata = normalizeMessageMetadata(undefined, "CHAT_MESSAGE");
 
     await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
       const encodedPayload = await this.encodePayload({
         toDeviceId,
+        ...(groupRoom
+          ? { recipientJids: this.getGroupEncryptionRecipientJids(groupRoom) }
+          : {}),
         body: fallbackBody,
         metadata,
       });
@@ -1600,7 +1719,11 @@ class LulaChatClient implements ChatClient {
         xml("store", { xmlns: XMPP_HINTS_NS }),
       ];
       await this.requireXmpp().send(
-        xml("message", { to: toDeviceId, type: "chat", id }, ...children),
+        xml(
+          "message",
+          { to: toDeviceId, type: groupRoom ? "groupchat" : "chat", id },
+          ...children,
+        ),
       );
     });
 
@@ -1885,11 +2008,19 @@ class LulaChatClient implements ChatClient {
     const roomId = input.roomId?.trim();
     const targetRoomId = input.targetRoomId?.trim() || roomId;
     const targetScope = input.targetScope ?? defaultTargetScope;
-    const targetDeviceIds = await this.resolveRoomTargets({
-      roomId: targetRoomId,
-      explicitDeviceIds: collectTargetDeviceIds(input),
-      targetScope,
-    });
+    const groupRoom =
+      this.getGroupRoomForTransport(targetRoomId) ??
+      this.getGroupRoomForTransport(roomId);
+    if (groupRoom) {
+      await this.ensureGroupRoomJoined(groupRoom.roomId);
+    }
+    const targetDeviceIds = groupRoom
+      ? [groupRoom.mucJid]
+      : await this.resolveRoomTargets({
+          roomId: targetRoomId,
+          explicitDeviceIds: collectTargetDeviceIds(input),
+          targetScope,
+        });
     this.log("debug", "chat_message_send_started", {
       id,
       roomId,
@@ -1914,6 +2045,9 @@ class LulaChatClient implements ChatClient {
       const sentTargets = await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
         const encodedPayload = await this.encodePayload({
           toDeviceId,
+          ...(groupRoom
+            ? { recipientJids: this.getGroupEncryptionRecipientJids(groupRoom) }
+            : {}),
           body: messageBody,
           metadata,
           attachments,
@@ -1938,12 +2072,18 @@ class LulaChatClient implements ChatClient {
         if (metadata.messageType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE) {
           children.push(xml("store", { xmlns: XMPP_HINTS_NS }));
         }
-        if (input.requestReceipt !== false) {
+        if (!groupRoom && input.requestReceipt !== false) {
           children.push(xml("request", { xmlns: XMPP_RECEIPTS_NS }));
           children.push(xml("markable", { xmlns: XMPP_CHAT_MARKERS_NS }));
         }
 
-        await xmpp.send(xml("message", { to: toDeviceId, type: "chat", id }, ...children));
+        await xmpp.send(
+          xml(
+            "message",
+            { to: toDeviceId, type: groupRoom ? "groupchat" : "chat", id },
+            ...children,
+          ),
+        );
       });
       if (serverAckPromise) {
         this.updateServerAckExpectedTargets(id, sentTargets);
@@ -1983,11 +2123,18 @@ class LulaChatClient implements ChatClient {
     if (!roomId) throw new Error("chat_room_id_required");
     const isTyping = input.isTyping ?? true;
     const targetScope = input.targetScope ?? "user";
-    const targetDeviceIds = await this.resolveRoomTargets({
-      roomId,
-      explicitDeviceIds: collectTargetDeviceIds(input),
-      targetScope,
-    });
+    const groupRoom = this.getGroupRoomForTransport(roomId);
+    if (groupRoom) {
+      await this.connect();
+      await this.ensureGroupRoomJoined(groupRoom.roomId);
+    }
+    const targetDeviceIds = groupRoom
+      ? [groupRoom.mucJid]
+      : await this.resolveRoomTargets({
+          roomId,
+          explicitDeviceIds: collectTargetDeviceIds(input),
+          targetScope,
+        });
 
     this.log("debug", "chat_typing_send_started", {
       roomId,
@@ -2005,7 +2152,7 @@ class LulaChatClient implements ChatClient {
       this.requireXmpp().send(
         xml("message", {
           to: toDeviceId,
-          type: "chat",
+          type: groupRoom ? "groupchat" : "chat",
           id: input.id || `typing-${Date.now()}`,
         }, ...children),
       ),
@@ -2033,11 +2180,20 @@ class LulaChatClient implements ChatClient {
     if (!roomId) throw new Error("chat_room_id_required");
     const targetRoomId = input.targetRoomId?.trim() || roomId;
     const targetScope = input.targetScope ?? "user";
-    const targetDeviceIds = await this.resolveRoomTargets({
-      roomId: targetRoomId,
-      explicitDeviceIds: collectTargetDeviceIds(input),
-      targetScope,
-    });
+    const groupRoom =
+      this.getGroupRoomForTransport(targetRoomId) ??
+      this.getGroupRoomForTransport(roomId);
+    if (groupRoom) {
+      await this.connect();
+      await this.ensureGroupRoomJoined(groupRoom.roomId);
+    }
+    const targetDeviceIds = groupRoom
+      ? [groupRoom.mucJid]
+      : await this.resolveRoomTargets({
+          roomId: targetRoomId,
+          explicitDeviceIds: collectTargetDeviceIds(input),
+          targetScope,
+        });
     const id = input.id?.trim() || `gone-${generateMessageId()}`;
 
     this.log("debug", "chat_thread_gone_send_started", {
@@ -2057,7 +2213,7 @@ class LulaChatClient implements ChatClient {
       this.requireXmpp().send(
         xml(
           "message",
-          { to: toDeviceId, type: "chat", id },
+          { to: toDeviceId, type: groupRoom ? "groupchat" : "chat", id },
           xml("thread", {}, roomId),
           xml("gone", { xmlns: XMPP_CHATSTATES_NS }),
         ),
@@ -2085,11 +2241,18 @@ class LulaChatClient implements ChatClient {
     if (!roomId) throw new Error("chat_room_id_required");
     if (!input.messageId.trim()) throw new Error("chat_message_id_required");
     const targetScope = input.targetScope ?? "user";
-    const targetDeviceIds = await this.resolveRoomTargets({
-      roomId,
-      explicitDeviceIds: collectTargetDeviceIds(input),
-      targetScope,
-    });
+    const groupRoom = this.getGroupRoomForTransport(roomId);
+    if (groupRoom) {
+      await this.connect();
+      await this.ensureGroupRoomJoined(groupRoom.roomId);
+    }
+    const targetDeviceIds = groupRoom
+      ? [groupRoom.mucJid]
+      : await this.resolveRoomTargets({
+          roomId,
+          explicitDeviceIds: collectTargetDeviceIds(input),
+          targetScope,
+        });
 
     this.log("debug", "chat_read_marker_send_started", {
       roomId,
@@ -2107,7 +2270,7 @@ class LulaChatClient implements ChatClient {
       this.requireXmpp().send(
         xml("message", {
           to: toDeviceId,
-          type: "chat",
+          type: groupRoom ? "groupchat" : "chat",
           id: input.id || `displayed-${Date.now()}`,
         }, ...children),
       ),
@@ -2182,6 +2345,12 @@ class LulaChatClient implements ChatClient {
       const event = parseConversationStateMessage(message);
       if (event) listener(event, delivery);
     });
+  }
+
+  public onGroupInvitation(
+    listener: (event: ChatGroupInvitationEvent) => void,
+  ): Unsubscribe {
+    return addListener(this.groupInvitationListeners, listener);
   }
 
   public onThreadGone(listener: (event: ChatThreadGoneEvent) => void): Unsubscribe {
@@ -2409,6 +2578,7 @@ class LulaChatClient implements ChatClient {
           this.log("error", "chat_encryption_connect_failed", { error });
           this.emit(this.errorListeners, { error });
         }
+        await this.rejoinGroupRooms();
         this.setStatus("online");
         this.log("info", "chat_online", {
           deviceId: this.onlineDeviceId,
@@ -2425,6 +2595,10 @@ class LulaChatClient implements ChatClient {
       this.setStatus("offline");
       this.onlineDeviceId = undefined;
       this.onlineReadinessPromise = null;
+      this.joinedGroupRooms.clear();
+      this.mucOccupantRealJids.clear();
+      this.clearAllGroupJoinRetries();
+      this.rejectPendingGroupJoins(new Error("chat_muc_offline"));
       this.log("warn", "chat_offline");
       this.rejectPendingIq(new Error("chat_iq_offline"));
       this.rejectServerAckWaiters(new Error("chat_stream_offline"));
@@ -2626,20 +2800,325 @@ class LulaChatClient implements ChatClient {
     return { direction, message };
   }
 
+  private normalizeGroupRoom(room: ChatGroupRoom): ChatGroupRoom {
+    const roomId = room.roomId.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+    const mucJid = normalizeBareDeviceId(room.mucJid).toLowerCase();
+    if (!mucJid || !mucJid.includes("@")) {
+      throw new Error("chat_muc_jid_required");
+    }
+    const ownBareJid = normalizeBareDeviceId(this.config.deviceId).toLowerCase();
+    const memberJids = Array.from(
+      new Set(
+        [ownBareJid, ...room.memberJids]
+          .map((jid) => normalizeBareDeviceId(jid).toLowerCase())
+          .filter(Boolean),
+      ),
+    );
+    return {
+      roomId,
+      mucJid,
+      memberJids,
+      ...(trimToUndefined(room.nickname)
+        ? { nickname: trimToUndefined(room.nickname) }
+        : {}),
+    };
+  }
+
+  private rememberGroupRoom(room: ChatGroupRoom): void {
+    const previous = this.groupRooms.get(room.roomId);
+    if (previous && previous.mucJid !== room.mucJid) {
+      this.groupRoomIdsByMucJid.delete(previous.mucJid);
+      this.joinedGroupRooms.delete(room.roomId);
+    }
+    this.groupRooms.set(room.roomId, room);
+    this.groupRoomIdsByMucJid.set(room.mucJid, room.roomId);
+  }
+
+  private getGroupNickname(room: ChatGroupRoom): string {
+    const preferred = room.nickname ?? `${this.config.userId}-${this.config.localDeviceId}`;
+    return preferred
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^[._-]+|[._-]+$/g, "")
+      .slice(0, 96) || `device-${this.config.localDeviceId}`;
+  }
+
+  private async ensureGroupRoomJoined(roomId: string): Promise<void> {
+    if (this.joinedGroupRooms.has(roomId)) return;
+    const pending = this.pendingGroupJoins.get(roomId);
+    if (pending) {
+      await pending.promise;
+      return;
+    }
+
+    const room = this.groupRooms.get(roomId);
+    if (!room) throw new Error(`chat_muc_room_unknown:${roomId}`);
+    const occupantJid = `${room.mucJid}/${this.getGroupNickname(room)}`;
+
+    let resolveJoin!: () => void;
+    let rejectJoin!: (error: Error) => void;
+    const joined = new Promise<void>((resolve, reject) => {
+      resolveJoin = resolve;
+      rejectJoin = reject;
+    });
+    const timeout = setTimeout(() => {
+      this.pendingGroupJoins.delete(roomId);
+      rejectJoin(new Error(`chat_muc_join_timeout:${roomId}`));
+    }, DEFAULT_MUC_JOIN_TIMEOUT_MS);
+    this.pendingGroupJoins.set(roomId, {
+      promise: joined,
+      resolve: resolveJoin,
+      reject: rejectJoin,
+      timeout,
+    });
+    joined.catch(() => {});
+
+    try {
+      await this.requireXmpp().send(
+        xml(
+          "presence",
+          { to: occupantJid },
+          xml("x", { xmlns: XMPP_MUC_NS }),
+        ),
+      );
+      await joined;
+    } catch (error) {
+      const waiter = this.pendingGroupJoins.get(roomId);
+      if (waiter) {
+        clearTimeout(waiter.timeout);
+        this.pendingGroupJoins.delete(roomId);
+        waiter.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+      throw error;
+    }
+  }
+
+  private clearGroupJoinRetry(roomId: string): void {
+    const timer = this.groupJoinRetryTimers.get(roomId);
+    if (timer) clearTimeout(timer);
+    this.groupJoinRetryTimers.delete(roomId);
+    this.groupJoinRetryAttempts.delete(roomId);
+  }
+
+  private clearAllGroupJoinRetries(): void {
+    for (const timer of this.groupJoinRetryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.groupJoinRetryTimers.clear();
+    this.groupJoinRetryAttempts.clear();
+  }
+
+  private scheduleGroupJoinRetry(roomId: string): void {
+    if (
+      this.joinedGroupRooms.has(roomId) ||
+      this.groupJoinRetryTimers.has(roomId) ||
+      !this.groupRooms.has(roomId)
+    ) {
+      return;
+    }
+    const attempt = this.groupJoinRetryAttempts.get(roomId) ?? 0;
+    const delayMs = MUC_JOIN_RETRY_DELAYS_MS[attempt];
+    if (delayMs === undefined) {
+      this.log("warn", "chat_muc_join_retry_exhausted", { roomId, attempt });
+      return;
+    }
+    this.groupJoinRetryAttempts.set(roomId, attempt + 1);
+    const timer = setTimeout(() => {
+      this.groupJoinRetryTimers.delete(roomId);
+      if (this.status !== "online" || !this.groupRooms.has(roomId)) return;
+      this.ensureGroupRoomJoined(roomId).catch((error) => {
+        this.log("warn", "chat_muc_join_retry_failed", {
+          roomId,
+          attempt: attempt + 1,
+          error,
+        });
+        this.scheduleGroupJoinRetry(roomId);
+      });
+    }, delayMs);
+    this.groupJoinRetryTimers.set(roomId, timer);
+    this.log("info", "chat_muc_join_retry_scheduled", {
+      roomId,
+      attempt: attempt + 1,
+      delayMs,
+    });
+  }
+
+  private async rejoinGroupRooms(): Promise<void> {
+    this.joinedGroupRooms.clear();
+    const roomIds = Array.from(this.groupRooms.keys());
+    const results = await Promise.allSettled(
+      roomIds.map((roomId) => this.ensureGroupRoomJoined(roomId)),
+    );
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        const roomId = roomIds[index];
+        this.log("warn", "chat_muc_rejoin_failed", {
+          roomId,
+          error: result.reason,
+        });
+        if (roomId) this.scheduleGroupJoinRetry(roomId);
+      }
+    });
+  }
+
+  private rejectPendingGroupJoins(error: Error): void {
+    const pending = Array.from(this.pendingGroupJoins.values());
+    this.pendingGroupJoins.clear();
+    pending.forEach((entry) => {
+      clearTimeout(entry.timeout);
+      entry.reject(error);
+    });
+  }
+
+  private handleGroupPresence(stanza: XmppElementLike): void {
+    const from = addressToString(stanza.attrs?.from) ?? "";
+    const mucJid = normalizeBareDeviceId(from).toLowerCase();
+    const roomId = this.groupRoomIdsByMucJid.get(mucJid);
+    if (!roomId) return;
+
+    const mucUser =
+      stanza.getChild?.("x", XMPP_MUC_USER_NS) ?? stanza.getChild?.("x");
+    const realJid = trimToUndefined(mucUser?.getChild?.("item")?.attrs?.jid);
+    const occupantKey = from.toLowerCase();
+    if (stanza.attrs?.type === "unavailable") {
+      this.mucOccupantRealJids.delete(occupantKey);
+    } else if (realJid) {
+      this.mucOccupantRealJids.set(occupantKey, realJid);
+    }
+
+    const room = this.groupRooms.get(roomId);
+    const expectedOccupant = room
+      ? `${room.mucJid}/${this.getGroupNickname(room)}`.toLowerCase()
+      : "";
+    const raw = toRawXmlString(stanza);
+    const isSelfPresence =
+      from.toLowerCase() === expectedOccupant ||
+      /<status\b[^>]*\bcode=["']110["']/.test(raw);
+    if (!isSelfPresence) return;
+
+    const waiter = this.pendingGroupJoins.get(roomId);
+    if (stanza.attrs?.type === "error") {
+      const parsed = parseStanzaError(stanza);
+      const error = new Error(
+        `chat_muc_join_error:${roomId}:${parsed.condition ?? "unknown"}`,
+      );
+      if (waiter) {
+        clearTimeout(waiter.timeout);
+        this.pendingGroupJoins.delete(roomId);
+        waiter.reject(error);
+      }
+      return;
+    }
+    if (stanza.attrs?.type === "unavailable") {
+      this.joinedGroupRooms.delete(roomId);
+      return;
+    }
+
+    this.joinedGroupRooms.add(roomId);
+    this.clearGroupJoinRetry(roomId);
+    if (waiter) {
+      clearTimeout(waiter.timeout);
+      this.pendingGroupJoins.delete(roomId);
+      waiter.resolve();
+    }
+    this.log("info", "chat_muc_joined", { roomId, mucJid });
+  }
+
+  private getMucRealSenderJid(stanza: XmppElementLike): string | undefined {
+    const mucUser =
+      stanza.getChild?.("x", XMPP_MUC_USER_NS) ?? stanza.getChild?.("x");
+    return (
+      trimToUndefined(mucUser?.getChild?.("item")?.attrs?.jid) ??
+      this.mucOccupantRealJids.get(
+        (addressToString(stanza.attrs?.from) ?? "").toLowerCase(),
+      )
+    );
+  }
+
+  private parseGroupInvitation(
+    stanza: XmppElementLike,
+  ): ChatGroupInvitationEvent | null {
+    const directInvite = stanza.getChild?.("x", XMPP_DIRECT_MUC_INVITE_NS);
+    const directMucJid = normalizeBareDeviceId(
+      trimToUndefined(directInvite?.attrs?.jid),
+    );
+    if (directMucJid) {
+      const fromJid = normalizeBareDeviceId(addressToString(stanza.attrs?.from));
+      return {
+        mucJid: directMucJid,
+        ...(fromJid ? { fromJid } : {}),
+        ...(trimToUndefined(directInvite?.attrs?.reason)
+          ? { reason: trimToUndefined(directInvite?.attrs?.reason) }
+          : {}),
+        ...(trimToUndefined(directInvite?.attrs?.password)
+          ? { password: trimToUndefined(directInvite?.attrs?.password) }
+          : {}),
+        raw: stanza,
+      };
+    }
+
+    const mucUser = stanza.getChild?.("x", XMPP_MUC_USER_NS);
+    const mediatedInvite = mucUser?.getChild?.("invite");
+    if (!mediatedInvite) return null;
+    const mucJid = normalizeBareDeviceId(addressToString(stanza.attrs?.from));
+    if (!mucJid) return null;
+    const fromJid = normalizeBareDeviceId(
+      trimToUndefined(mediatedInvite.attrs?.from),
+    );
+    const reason = trimToUndefined(mediatedInvite.getChildText?.("reason"));
+    const password = trimToUndefined(mucUser?.getChildText?.("password"));
+    return {
+      mucJid,
+      ...(fromJid ? { fromJid } : {}),
+      ...(reason ? { reason } : {}),
+      ...(password ? { password } : {}),
+      raw: stanza,
+    };
+  }
+
   private async handleStanza(stanza: XmppElementLike): Promise<void> {
     this.resolvePendingIq(stanza);
+    if (stanza.is?.("presence")) {
+      this.handleGroupPresence(stanza);
+      return;
+    }
     if (!stanza.is?.("message")) return;
 
     const carbon = this.unwrapCarbonMessage(stanza);
     const messageStanza = carbon?.message ?? stanza;
     const attrs = messageStanza.attrs ?? {};
-    const fromFullAddress = normalizeTransportAddress(addressToString(attrs.from));
-    const fromDeviceId = fromFullAddress || normalizeBareDeviceId(addressToString(attrs.from));
+    const groupInvitation = this.parseGroupInvitation(messageStanza);
+    if (groupInvitation) {
+      this.emit(this.groupInvitationListeners, groupInvitation);
+      this.log("info", "chat_muc_invitation_received", {
+        mucJid: groupInvitation.mucJid,
+        fromJid: groupInvitation.fromJid,
+      });
+      return;
+    }
+    const isGroupMessage = attrs.type === "groupchat";
+    const mucSenderJid = isGroupMessage
+      ? this.getMucRealSenderJid(messageStanza)
+      : undefined;
+    const stanzaFromAddress = addressToString(attrs.from);
+    const fromFullAddress = normalizeTransportAddress(
+      mucSenderJid ?? stanzaFromAddress,
+    );
+    const fromDeviceId =
+      fromFullAddress || normalizeBareDeviceId(mucSenderJid ?? stanzaFromAddress);
     const fromUserId = getUserIdFromChatAddress(fromFullAddress) || "";
-    const toDeviceId = attrs.to
+    const toDeviceId = isGroupMessage
+      ? this.getDeviceId()
+      : attrs.to
       ? normalizeTransportAddress(addressToString(attrs.to)) || addressToString(attrs.to)
       : this.getDeviceId();
-    const roomId = trimToUndefined(messageStanza.getChildText?.("thread") ?? undefined);
+    const mucRoomId = isGroupMessage
+      ? this.groupRoomIdsByMucJid.get(normalizeBareDeviceId(stanzaFromAddress))
+      : undefined;
+    const roomId =
+      trimToUndefined(messageStanza.getChildText?.("thread") ?? undefined) ?? mucRoomId;
     this.rememberRoomPeer(roomId, carbon?.direction === "sent" ? toDeviceId : fromDeviceId);
     this.log("debug", "chat_message_stanza_received", {
       id: attrs.id,
@@ -2861,7 +3340,9 @@ class LulaChatClient implements ChatClient {
     };
     const originalAuthorAddress = fromFullAddress || fromDeviceId;
     const receiptRequest = messageStanza.getChild?.("request", XMPP_RECEIPTS_NS);
-    const receiptRequested = Boolean(!carbon && attrs.id && receiptRequest && fromDeviceId);
+    const receiptRequested = Boolean(
+      !carbon && !isGroupMessage && attrs.id && receiptRequest && fromDeviceId,
+    );
     let receiptSent = false;
     let receiptPromise: Promise<void> | null = null;
     const delivery: ChatIncomingDeliveryContext = {
@@ -2988,7 +3469,7 @@ class LulaChatClient implements ChatClient {
     if (!normalizedRoomId) throw new Error("chat_room_id_required");
     this.rememberRoomPeers(
       normalizedRoomId,
-      deriveFanoutDeviceIds(room),
+      deriveRoomDeviceIds(room),
     );
     return { ...room, roomId: normalizedRoomId };
   }
@@ -3024,6 +3505,33 @@ class LulaChatClient implements ChatClient {
       throw new Error(`chat_room_peer_unknown${suffix}`);
     }
     return targets;
+  }
+
+  private getGroupRoomForTransport(roomId?: string): ChatGroupRoom | undefined {
+    const normalizedRoomId = roomId?.trim();
+    return normalizedRoomId ? this.groupRooms.get(normalizedRoomId) : undefined;
+  }
+
+  private getGroupEncryptionRecipientJids(room: ChatGroupRoom): DeviceId[] {
+    const occupantPrefix = `${normalizeBareDeviceId(room.mucJid).toLowerCase()}/`;
+    const activeOccupants = Array.from(this.mucOccupantRealJids.entries())
+      .filter(([occupantJid]) => occupantJid.startsWith(occupantPrefix))
+      .map(([, realJid]) => normalizeBareDeviceId(realJid))
+      .filter(Boolean);
+    const recipients = Array.from(
+      new Set(
+        [...room.memberJids, ...activeOccupants]
+          .map((jid) => normalizeBareDeviceId(jid))
+          .filter(Boolean),
+      ),
+    );
+    this.log("debug", "chat_muc_encryption_recipients_resolved", {
+      roomId: room.roomId,
+      configuredCount: room.memberJids.length,
+      activeOccupantCount: activeOccupants.length,
+      recipientCount: recipients.length,
+    });
+    return recipients;
   }
 
   private getCachedRoomPeers(roomId: string): string[] {
@@ -3785,12 +4293,29 @@ export function createOmemoEncryption(
       }
 
       const state = await loadOrCreateState(bareJid);
-      const recipientBareJid = normalizeBareDeviceId(input.toDeviceId);
-      const recipientSessions = await establishPeerSessions(context, recipientBareJid);
-      const senderSessions =
-        recipientBareJid === bareJid
-          ? []
-          : await establishPeerSessions(context, bareJid);
+      const recipientBareJids = Array.from(
+        new Set(
+          (input.recipientJids?.length
+            ? input.recipientJids
+            : [input.toDeviceId]
+          )
+            .map((address) => normalizeBareDeviceId(address))
+            .filter(Boolean),
+        ),
+      );
+      if (!recipientBareJids.length) {
+        throw new Error("xmpp_omemo_recipient_required");
+      }
+      const recipientSessions = (
+        await Promise.all(
+          recipientBareJids.map((recipientBareJid) =>
+            establishPeerSessions(context, recipientBareJid),
+          ),
+        )
+      ).flat();
+      const senderSessions = recipientBareJids.includes(bareJid)
+        ? []
+        : await establishPeerSessions(context, bareJid);
       const sessions = [...recipientSessions, ...senderSessions];
       const iv = nobleRandomBytes(12);
       const contentKey = nobleRandomBytes(OMEMO_AES_KEY_BYTES);
@@ -4881,7 +5406,7 @@ function normalizeChatRoomResponse(
   };
 }
 
-function deriveFanoutDeviceIds(room: Pick<ChatRoom, "peerDeviceIds" | "ownDeviceIds">): DeviceId[] {
+function deriveRoomDeviceIds(room: Pick<ChatRoom, "peerDeviceIds" | "ownDeviceIds">): DeviceId[] {
   return normalizeTransportAddressList([...(room.peerDeviceIds ?? []), ...(room.ownDeviceIds ?? [])]);
 }
 
