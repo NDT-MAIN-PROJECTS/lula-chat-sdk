@@ -137,6 +137,8 @@ export type ChatMessageMetadata = Record<string, unknown> & {
     | typeof CHAT_EMERGENCY_MESSAGE_TYPE
     | typeof CHAT_VOICE_MESSAGE_TYPE;
   canonicalEventId?: string;
+  /** XEP-0359 id assigned by the originating client and preserved across retries. */
+  originId?: string;
   replyTo?: ChatReplyReference;
   chatInteractionType?: typeof CHAT_REACTION_INTERACTION_TYPE;
   reactionToId?: string;
@@ -1240,6 +1242,7 @@ const XMPP_FALLBACK_NS = "urn:xmpp:fallback:0";
 const XMPP_HINTS_NS = "urn:xmpp:hints";
 const XMPP_RETRACT_NS = "urn:xmpp:message-retract:1";
 const XMPP_STREAM_MANAGEMENT_NS = "urn:xmpp:sm:3";
+const XMPP_STABLE_ID_NS = "urn:xmpp:sid:0";
 const XMPP_MUC_NS = "http://jabber.org/protocol/muc";
 const XMPP_MUC_USER_NS = "http://jabber.org/protocol/muc#user";
 const XMPP_DIRECT_MUC_INVITE_NS = "jabber:x:conference";
@@ -2055,6 +2058,9 @@ class LulaChatClient implements ChatClient {
         const children: XmppChild[] = [
           xml("body", {}, encodedPayload.body ?? messageBody),
           ...encodedPayload.children,
+          // Keep the application-generated id stable when a stanza is replayed
+          // by stream management or resent from a durable client outbox.
+          xml("origin-id", { xmlns: XMPP_STABLE_ID_NS, id }),
         ];
 
         if (roomId) children.push(xml("thread", {}, roomId));
@@ -3314,9 +3320,13 @@ class LulaChatClient implements ChatClient {
           emergencyTriggeredAt: emergencyTag.attrs?.["triggered-at"],
         }
       : undefined;
-    const decodedMetadata = emergencyTagMetadata
+    const originId = trimToUndefined(
+      messageStanza.getChild?.("origin-id", XMPP_STABLE_ID_NS)?.attrs?.id,
+    );
+    const decodedMetadata: Record<string, unknown> = emergencyTagMetadata
       ? { ...(decoded.metadata ?? {}), ...emergencyTagMetadata }
-      : decoded.metadata;
+      : { ...(decoded.metadata ?? {}) };
+    if (originId) decodedMetadata.originId = originId;
     const metadata = normalizeMessageMetadata(
       decodedMetadata,
       inferMessageType(decodedMetadata, body),
@@ -3393,17 +3403,37 @@ class LulaChatClient implements ChatClient {
     roomId?: string;
     messageId: string;
   }): Promise<void> {
+    const xmpp = this.requireXmpp();
+    const receiptId = `rcpt-${generateMessageId()}`;
     const children: XmppChild[] = [
       xml("received", { xmlns: XMPP_RECEIPTS_NS, id: input.messageId }),
     ];
     if (input.roomId) children.unshift(xml("thread", {}, input.roomId));
-    await this.requireXmpp().send(
-      xml("message", {
-        to: input.toDeviceId,
-        type: "chat",
-        id: `rcpt-${Date.now()}`,
-      }, ...children),
-    );
+    if (
+      this.config.awaitServerAcknowledgement &&
+      (xmpp.streamManagement as XmppStreamManagementLike).enabled !== true
+    ) {
+      throw new Error("chat_stream_management_unavailable");
+    }
+    const serverAckPromise = this.config.awaitServerAcknowledgement
+      ? this.createServerAckWaiter(receiptId, [input.toDeviceId])
+      : null;
+    try {
+      await xmpp.send(
+        xml("message", {
+          to: input.toDeviceId,
+          type: "chat",
+          id: receiptId,
+        }, ...children),
+      );
+      if (serverAckPromise) {
+        this.updateServerAckExpectedTargets(receiptId, [input.toDeviceId]);
+        await serverAckPromise;
+      }
+    } catch (error) {
+      this.cancelServerAckWaiter(receiptId);
+      throw error;
+    }
   }
 
   private getEncryptionContext(): ChatEncryptionContext {

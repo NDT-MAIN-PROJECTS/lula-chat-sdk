@@ -275,9 +275,10 @@ XEP-0280 coverage.
 
 ### XEP-0198 server acceptance and durable outboxes
 
-Clients with a durable outbox can use ejabberd's stream-management
-acknowledgement as the point where a staged message no longer needs app-level
-retransmission:
+Clients with a durable outbox should use ejabberd's stream-management
+acknowledgement as the `serverAccepted` transition, not as proof that the
+recipient durably stored the message. Retain direct messages until XEP-0184 is
+received:
 
 ```ts
 const chatClient = init({
@@ -289,17 +290,26 @@ const chatClient = init({
 await durableOutbox.stage(message); // persist before touching the network
 try {
   await chatClient.sendChatMessage(message); // resolves after XEP-0198 ack
-  await durableOutbox.remove(message.id);
+  await durableOutbox.markServerAccepted(message.id);
 } catch (error) {
   await durableOutbox.keepForRetry(message.id, error);
 }
+
+chatClient.onDelivery(async (event) => {
+  if (event.status === "delivered" || event.status === "read") {
+    await durableOutbox.remove(event.id);
+  }
+});
 ```
 
 During a resumable disconnect, xmpp.js replays only stanzas that ejabberd has
 not acknowledged; an app-level timer must not send the same in-flight entry at
 the same time. The durable outbox is still required for process termination,
-because XEP-0198 stream state is in memory. After a cold start, retry the same
-stable stanza id so receiving clients can apply idempotent persistence.
+because XEP-0198 stream state is in memory. Outgoing content messages include a
+XEP-0359 `<origin-id/>`; after a cold start or missing receipt, retry the same
+stable stanza id so receiving clients can apply idempotent persistence. A MUC
+send remains server-accepted because per-occupant XEP-0184 receipts are not a
+practical room-wide delivery boundary.
 
 `onServerAcknowledged`, `onServerSendFailed`, and `onStreamManagement` are
 available for observability in every SDK consumer. XEP-0198 proves server
