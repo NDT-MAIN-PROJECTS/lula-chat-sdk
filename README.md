@@ -548,9 +548,63 @@ This allows applications to migrate incrementally: sending can move to `sendRepl
 
 ## Attachments
 
-Pass an `attachmentService` in `init()` to upload and resolve room attachments. The SDK asks that adapter to upload a file, then carries the returned attachment object inside encrypted chat payloads and Lula fallback payloads.
+Attachments use XEP-0363 for transport and OMEMO for their private manifest. No
+Lula business API call is needed for a new upload or download:
+
+1. the SDK requests a one-time XMPP upload slot
+2. the sender encrypts bytes locally with AES-256-GCM
+3. the upload bridge stores only immutable ciphertext and returns a scoped read
+   capability in response headers
+4. the opaque locator, capability, AES key, hashes and metadata travel only in
+   the OMEMO-encrypted stanza
+5. recipients send the capability as an `Authorization` header, verify hashes,
+   and decrypt locally
+
+Pass an `attachmentService` only when a platform needs native file I/O or native
+crypto (for example React Native). The SDK asks that adapter to upload a file,
+then carries the returned attachment object inside encrypted chat payloads.
 
 If you use an XMPP upload service, the SDK can request upload slots for the adapter through `context.requestSlot(...)`.
+
+Production clients should set `requireEncryptedPayloads: true` and
+`requireEncryptedAttachments: true`. Connector apps can use the complete SDK
+reference implementation by supplying bytes; `sendAttachment()` then uses the
+same slot/encryption/capability flow automatically. The exported helpers are
+also available when a connector wants explicit lifecycle control.
+
+```ts
+import {
+  downloadChatAttachmentWithFetch,
+  uploadChatAttachmentWithFetch,
+} from "@hubnet-systems/chat-sdk";
+
+const client = init({
+  // ...authentication, room configuration, and OMEMO encryption
+  requireEncryptedPayloads: true,
+  requireEncryptedAttachments: true,
+});
+
+await client.sendAttachment({
+  roomId: "room-123",
+  attachment: {
+    name: "evidence.pdf",
+    mimeType: "application/pdf",
+    data: await readBytes("evidence.pdf"),
+  },
+});
+
+// Explicit connector lifecycle, when needed:
+const manifest = await uploadChatAttachmentWithFetch(file, uploadContext);
+const plaintext = await downloadChatAttachmentWithFetch(manifest);
+```
+
+Never publish `encryption.keyB64` or `downloadCapability.authorization` outside
+the OMEMO payload, log either value, or put either in a URL. Connector
+applications consuming form submissions use the same SDK contract; the
+attachment manifest is part of the form submission, not a second message.
+
+Attachment downloads require a capability-bearing manifest and never call the
+Lula API for a signed URL.
 
 ## Auth
 
