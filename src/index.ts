@@ -2,7 +2,7 @@ import { gcm } from "@noble/ciphers/aes.js";
 import { x25519 } from "@noble/curves/ed25519.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { randomBytes as nobleRandomBytes } from "@noble/hashes/utils.js";
+import { randomBytes as nobleRandomBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { client as createXmppClient, xml } from "@xmpp/client";
 import { customAlphabet } from "nanoid/non-secure";
 import saslMechanisms from "saslmechanisms";
@@ -250,7 +250,119 @@ export type ChatAttachment = {
   width?: number;
   height?: number;
   metadata?: Record<string, unknown>;
+  /**
+   * Per-file content-encryption material. This object is carried only inside
+   * the OMEMO-protected message payload; object storage receives ciphertext.
+   */
+  encryption?: ChatAttachmentEncryption;
+  /**
+   * Read authority for the opaque object locator. The authorization value is
+   * deliberately separate from `url` so it is never copied into query strings,
+   * access logs, analytics, or link previews. Like the AES key, this object is
+   * only safe because the attachment manifest is carried inside OMEMO.
+   */
+  downloadCapability?: ChatAttachmentDownloadCapability;
 };
+
+export type ChatAttachmentDownloadCapability = {
+  v: 1;
+  scheme: "LulaAttachment";
+  authorization: string;
+  expiresAt: string;
+};
+
+export const CHAT_ATTACHMENT_CAPABILITY_HEADER =
+  "x-lula-attachment-capability" as const;
+export const CHAT_ATTACHMENT_CAPABILITY_EXPIRES_HEADER =
+  "x-lula-attachment-capability-expires" as const;
+
+export type ChatAttachmentEncryption = {
+  v: 1;
+  alg: "A256GCM";
+  keyB64: string;
+  ivB64: string;
+  plaintextSha256B64: string;
+  ciphertextSha256B64: string;
+  plaintextSize: number;
+  ciphertextSize: number;
+};
+
+export type ChatAttachmentEncryptionResult = {
+  ciphertext: Uint8Array;
+  encryption: ChatAttachmentEncryption;
+};
+
+const CHAT_ATTACHMENT_ENCRYPTION_AAD = utf8ToBytes("urn:lula:defy:attachment:1");
+
+export function encryptChatAttachmentBytes(
+  input: ArrayBuffer | Uint8Array,
+): ChatAttachmentEncryptionResult {
+  const plaintext =
+    input instanceof Uint8Array ? new Uint8Array(input) : new Uint8Array(input);
+  const key = nobleRandomBytes(32);
+  const iv = nobleRandomBytes(12);
+  const ciphertext = gcm(key, iv, CHAT_ATTACHMENT_ENCRYPTION_AAD).encrypt(plaintext);
+  return {
+    ciphertext,
+    encryption: {
+      v: 1,
+      alg: "A256GCM",
+      keyB64: bytesToBase64(key),
+      ivB64: bytesToBase64(iv),
+      plaintextSha256B64: bytesToBase64(sha256(plaintext)),
+      ciphertextSha256B64: bytesToBase64(sha256(ciphertext)),
+      plaintextSize: plaintext.length,
+      ciphertextSize: ciphertext.length,
+    },
+  };
+}
+
+export function decryptChatAttachmentBytes(
+  input: ArrayBuffer | Uint8Array,
+  encryption: ChatAttachmentEncryption,
+): Uint8Array {
+  const ciphertext =
+    input instanceof Uint8Array ? new Uint8Array(input) : new Uint8Array(input);
+  const normalized = normalizeAttachmentEncryption(encryption);
+  if (!normalized) throw new Error("chat_attachment_encryption_invalid");
+  if (ciphertext.length !== normalized.ciphertextSize) {
+    throw new Error("chat_attachment_ciphertext_size_mismatch");
+  }
+  if (bytesToBase64(sha256(ciphertext)) !== normalized.ciphertextSha256B64) {
+    throw new Error("chat_attachment_ciphertext_hash_mismatch");
+  }
+  let plaintext: Uint8Array;
+  try {
+    plaintext = gcm(
+      base64ToBytes(normalized.keyB64),
+      base64ToBytes(normalized.ivB64),
+      CHAT_ATTACHMENT_ENCRYPTION_AAD,
+    ).decrypt(ciphertext);
+  } catch {
+    throw new Error("chat_attachment_decryption_failed");
+  }
+  if (plaintext.length !== normalized.plaintextSize) {
+    throw new Error("chat_attachment_plaintext_size_mismatch");
+  }
+  if (bytesToBase64(sha256(plaintext)) !== normalized.plaintextSha256B64) {
+    throw new Error("chat_attachment_plaintext_hash_mismatch");
+  }
+  return plaintext;
+}
+
+export function isEncryptedChatAttachment(
+  attachment: Pick<ChatAttachment, "encryption">,
+): boolean {
+  return Boolean(normalizeAttachmentEncryption(attachment.encryption));
+}
+
+export function hasChatAttachmentDownloadCapability(
+  attachment: Pick<ChatAttachment, "downloadCapability">,
+): boolean {
+  return Boolean(
+    normalizeAttachmentDownloadCapability(attachment.downloadCapability),
+  );
+}
 
 export type ChatAttachmentUpload = {
   uri?: string;
@@ -304,6 +416,191 @@ export type ChatAttachmentService = {
     context: ChatAttachmentResolveContext,
   ) => Promise<string | null | undefined> | string | null | undefined;
 };
+
+export type ChatAttachmentFetch = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export type ChatAttachmentFetchUploadOptions = {
+  fetch?: ChatAttachmentFetch;
+  loadBytes?: (
+    input: ChatAttachmentUpload,
+  ) => Promise<ArrayBuffer | Uint8Array> | ArrayBuffer | Uint8Array;
+};
+
+export type ChatAttachmentFetchDownloadOptions = {
+  fetch?: ChatAttachmentFetch;
+};
+
+function readAttachmentResponseHeader(
+  headers: Headers | Record<string, string | string[] | undefined>,
+  name: string,
+): string | undefined {
+  if (typeof (headers as Headers).get === "function") {
+    return (headers as Headers).get(name)?.trim() || undefined;
+  }
+  const expected = name.toLowerCase();
+  for (const [headerName, rawValue] of Object.entries(headers)) {
+    if (headerName.toLowerCase() !== expected) continue;
+    const value = Array.isArray(rawValue) ? rawValue[0] : rawValue;
+    return value?.trim() || undefined;
+  }
+  return undefined;
+}
+
+/** Parse the one-time upload response without ever placing its secret in a URL. */
+export function chatAttachmentDownloadCapabilityFromHeaders(
+  headers: Headers | Record<string, string | string[] | undefined>,
+): ChatAttachmentDownloadCapability {
+  const authorization = readAttachmentResponseHeader(
+    headers,
+    CHAT_ATTACHMENT_CAPABILITY_HEADER,
+  );
+  const expiresRaw = readAttachmentResponseHeader(
+    headers,
+    CHAT_ATTACHMENT_CAPABILITY_EXPIRES_HEADER,
+  );
+  const expiresEpochSeconds = Number.parseInt(expiresRaw ?? "", 10);
+  if (
+    !authorization ||
+    !/^LulaAttachment\s+v1\.[A-Za-z0-9._-]+$/.test(authorization) ||
+    !Number.isSafeInteger(expiresEpochSeconds) ||
+    expiresEpochSeconds <= 0
+  ) {
+    throw new Error("chat_attachment_download_capability_invalid");
+  }
+  return {
+    v: 1,
+    scheme: "LulaAttachment",
+    authorization,
+    expiresAt: new Date(expiresEpochSeconds * 1000).toISOString(),
+  };
+}
+
+export function buildChatAttachmentDownloadRequest(
+  attachment: ChatAttachment,
+): { url: string; headers: Record<string, string> } {
+  const url = firstString(attachment.url, attachment.id);
+  if (!url || !/^https?:\/\//i.test(url)) {
+    throw new Error("chat_attachment_download_locator_invalid");
+  }
+  const capability = normalizeAttachmentDownloadCapability(
+    attachment.downloadCapability,
+  );
+  if (!capability) {
+    throw new Error("chat_attachment_download_capability_required");
+  }
+  if (Date.parse(capability.expiresAt) <= Date.now()) {
+    throw new Error("chat_attachment_download_capability_expired");
+  }
+  return {
+    url,
+    headers: { Authorization: capability.authorization },
+  };
+}
+
+function requiredAttachmentFetch(fetchOverride?: ChatAttachmentFetch): ChatAttachmentFetch {
+  const fetchImpl = fetchOverride ?? globalThis.fetch;
+  if (typeof fetchImpl !== "function") {
+    throw new Error("chat_attachment_fetch_unavailable");
+  }
+  return fetchImpl.bind(globalThis) as ChatAttachmentFetch;
+}
+
+function stableChatAttachmentLocator(sourceUrl: string): string {
+  try {
+    const parsed = new URL(sourceUrl);
+    for (const key of [
+      "v",
+      "v2",
+      "token",
+      "size",
+      "content_type",
+      "expires",
+      "slot",
+      "username",
+    ]) {
+      parsed.searchParams.delete(key);
+    }
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return sourceUrl;
+  }
+}
+
+/**
+ * Reference connector implementation: encrypt locally, request an XEP-0363
+ * slot through the SDK, PUT ciphertext, and return the OMEMO-safe manifest.
+ */
+export async function uploadChatAttachmentWithFetch(
+  input: ChatAttachmentUpload,
+  context: ChatAttachmentUploadContext,
+  options: ChatAttachmentFetchUploadOptions = {},
+): Promise<ChatAttachment> {
+  const bytes = input.data ?? (await options.loadBytes?.(input));
+  if (!(bytes instanceof ArrayBuffer) && !(bytes instanceof Uint8Array)) {
+    throw new Error("chat_attachment_bytes_required");
+  }
+  const name = firstString(input.name) ?? `attachment-${Date.now()}.bin`;
+  const mimeType = firstString(input.mimeType) ?? "application/octet-stream";
+  const encrypted = encryptChatAttachmentBytes(bytes);
+  const encryptedName = `${name.replace(/[^\w.-]/g, "_").slice(-96) || "attachment"}.lulaenc`;
+  const slot = await context.requestSlot({
+    name: encryptedName,
+    mimeType: "application/octet-stream",
+    size: encrypted.encryption.ciphertextSize,
+  });
+  const response = await requiredAttachmentFetch(options.fetch)(slot.putUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      ...slot.headers,
+    },
+    body: encrypted.ciphertext as BodyInit,
+  });
+  if (!response.ok) {
+    throw new Error(`chat_attachment_upload_failed:${response.status}`);
+  }
+  const downloadCapability = chatAttachmentDownloadCapabilityFromHeaders(
+    response.headers,
+  );
+  const stableLocator = stableChatAttachmentLocator(slot.getUrl.trim());
+  if (!/^https?:\/\//i.test(stableLocator)) {
+    throw new Error("chat_attachment_download_locator_invalid");
+  }
+  return normalizeRequiredAttachment({
+    id: stableLocator,
+    type: mimeType.startsWith("image/") ? "image" : "file",
+    name,
+    mimeType,
+    size: encrypted.encryption.plaintextSize,
+    url: stableLocator,
+    metadata: input.metadata,
+    encryption: encrypted.encryption,
+    downloadCapability,
+  });
+}
+
+/** Reference connector download path for capability-protected attachments. */
+export async function downloadChatAttachmentWithFetch(
+  attachment: ChatAttachment,
+  options: ChatAttachmentFetchDownloadOptions = {},
+): Promise<Uint8Array> {
+  const request = buildChatAttachmentDownloadRequest(attachment);
+  const response = await requiredAttachmentFetch(options.fetch)(request.url, {
+    method: "GET",
+    headers: request.headers,
+  });
+  if (!response.ok) {
+    throw new Error(`chat_attachment_download_failed:${response.status}`);
+  }
+  const downloaded = new Uint8Array(await response.arrayBuffer());
+  return attachment.encryption
+    ? decryptChatAttachmentBytes(downloaded, attachment.encryption)
+    : downloaded;
+}
 
 /**
  * Single source for how a voice message is recorded. Apps take their recorder
@@ -521,8 +818,19 @@ export type ChatClientBaseConfig = {
   /** Message encryption adapter. Pass createOmemoEncryption(...) for built-in OMEMO. */
   encryption: ChatEncryption;
 
+  /**
+   * Reject outbound and inbound user-message payloads when the encryption
+   * adapter cannot produce or decode an encrypted envelope. Production OMEMO
+   * clients should enable this so metadata and attachment keys never fall
+   * back to the plain Lula extension.
+   */
+  requireEncryptedPayloads?: boolean;
+
   /** Attachment upload and resolve adapter for file and image messages. */
   attachmentService?: ChatAttachmentService;
+
+  /** Reject outgoing attachment manifests without client-side encryption. */
+  requireEncryptedAttachments?: boolean;
 };
 
 export type ChatPasswordAuthConfig = ChatClientBaseConfig & {
@@ -1853,15 +2161,22 @@ class LulaChatClient implements ChatClient {
     const roomId = input.roomId.trim();
     if (!roomId) throw new Error("chat_room_id_required");
     if (!input.attachment) throw new Error("chat_attachment_required");
-    if (!this.config.attachmentService?.upload) {
-      throw new Error("chat_attachment_service_required");
-    }
     await this.connect();
-    const uploaded = await this.config.attachmentService.upload(
-      input.attachment,
-      this.getAttachmentUploadContext(roomId),
-    );
-    return normalizeRequiredAttachment(uploaded);
+    const context = this.getAttachmentUploadContext(roomId);
+    const uploaded = this.config.attachmentService?.upload
+      ? await this.config.attachmentService.upload(input.attachment, context)
+      : await uploadChatAttachmentWithFetch(input.attachment, context);
+    const normalized = normalizeRequiredAttachment(uploaded);
+    if (this.config.requireEncryptedAttachments && !isEncryptedChatAttachment(normalized)) {
+      throw new Error("chat_attachment_encryption_required");
+    }
+    if (
+      this.config.requireEncryptedAttachments &&
+      !hasChatAttachmentDownloadCapability(normalized)
+    ) {
+      throw new Error("chat_attachment_download_capability_required");
+    }
+    return normalized;
   }
 
   public async sendAttachment(
@@ -2003,6 +2318,20 @@ class LulaChatClient implements ChatClient {
     const messageBody = input.body ?? "";
     const attachments = normalizeAttachmentPayload(input.attachments);
     if (!messageBody.trim() && !attachments?.length) throw new Error("chat_body_required");
+    if (
+      this.config.requireEncryptedAttachments &&
+      attachments?.some((attachment) => !isEncryptedChatAttachment(attachment))
+    ) {
+      throw new Error("chat_attachment_encryption_required");
+    }
+    if (
+      this.config.requireEncryptedAttachments &&
+      attachments?.some(
+        (attachment) => !hasChatAttachmentDownloadCapability(attachment),
+      )
+    ) {
+      throw new Error("chat_attachment_download_capability_required");
+    }
     const metadata = normalizeMessageMetadata(input.metadata, "CHAT_MESSAGE");
 
     await this.connect();
@@ -2296,6 +2625,9 @@ class LulaChatClient implements ChatClient {
         this.getAttachmentResolveContext(),
       );
       if (typeof resolved === "string" && resolved.trim()) return resolved.trim();
+    }
+    if (isEncryptedChatAttachment(normalized)) {
+      throw new Error("chat_attachment_resolver_required");
     }
     return defaultAttachmentSource(normalized);
   }
@@ -3294,6 +3626,52 @@ class LulaChatClient implements ChatClient {
     const decoded = await this.decodePayload(messageStanza);
     const body = decoded.body;
     const attachments = normalizeAttachmentPayload(decoded.attachments);
+    if (
+      this.config.requireEncryptedAttachments &&
+      attachments?.some((attachment) => !isEncryptedChatAttachment(attachment))
+    ) {
+      const error = new Error("chat_attachment_encryption_required");
+      this.log("warn", "chat_attachment_rejected_unencrypted", {
+        id: attrs.id,
+        roomId,
+        fromDeviceId,
+      });
+      this.emit(this.errorListeners, {
+        id: attrs.id,
+        fromUserId: fromUserId || undefined,
+        fromFullAddress: fromFullAddress || undefined,
+        fromDeviceId,
+        toDeviceId,
+        roomId,
+        error,
+        raw: messageStanza,
+      });
+      return;
+    }
+    if (
+      this.config.requireEncryptedAttachments &&
+      attachments?.some(
+        (attachment) => !hasChatAttachmentDownloadCapability(attachment),
+      )
+    ) {
+      const error = new Error("chat_attachment_download_capability_required");
+      this.log("warn", "chat_attachment_rejected_without_capability", {
+        id: attrs.id,
+        roomId,
+        fromDeviceId,
+      });
+      this.emit(this.errorListeners, {
+        id: attrs.id,
+        fromUserId: fromUserId || undefined,
+        fromFullAddress: fromFullAddress || undefined,
+        fromDeviceId,
+        toDeviceId,
+        roomId,
+        error,
+        raw: messageStanza,
+      });
+      return;
+    }
     if (!body.trim() && !attachments?.length) {
       this.log("debug", gone ? "chat_message_ignored_chat_state" : "chat_message_ignored_empty", {
         id: attrs.id,
@@ -3658,6 +4036,10 @@ class LulaChatClient implements ChatClient {
       };
     }
 
+    if (this.config.requireEncryptedPayloads) {
+      throw new Error("chat_payload_encryption_required");
+    }
+
     this.log("debug", "chat_payload_encoded_plain", {
       messageType: input.metadata.messageType,
       hasAttachments: Boolean(input.attachments?.length),
@@ -3690,6 +4072,10 @@ class LulaChatClient implements ChatClient {
         hasAttachments: Boolean(decrypted.attachments?.length),
       });
       return decrypted;
+    }
+
+    if (this.config.requireEncryptedPayloads) {
+      throw new Error("chat_payload_encryption_required");
     }
 
     const body = stanza.getChildText?.("body") ?? "";
@@ -4502,6 +4888,8 @@ type NormalizedConfig = {
   requireMessageCarbons: boolean;
   requireStreamManagement: boolean;
   awaitServerAcknowledgement: boolean;
+  requireEncryptedAttachments: boolean;
+  requireEncryptedPayloads: boolean;
   roomDirectory?: ChatRoomDirectory;
   resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
   resolveMessageAuthor?: ChatMessageAuthorResolver;
@@ -4546,6 +4934,8 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
     requireMessageCarbons: config.requireMessageCarbons ?? false,
     requireStreamManagement: config.requireStreamManagement ?? false,
     awaitServerAcknowledgement: config.awaitServerAcknowledgement ?? false,
+    requireEncryptedAttachments: config.requireEncryptedAttachments ?? false,
+    requireEncryptedPayloads: config.requireEncryptedPayloads ?? false,
     roomDirectory: config.roomDirectory,
     resolveRoomDeviceIds: config.resolveRoomDeviceIds,
     resolveMessageAuthor: config.resolveMessageAuthor,
@@ -5007,6 +5397,10 @@ function isFormSubmissionMessage(message: ChatMessage): boolean {
 }
 
 function isAttachmentMessage(message: ChatMessage): boolean {
+  // A form submission may carry an attachment manifest. It remains one typed
+  // form event and must not also surface through the generic attachment
+  // listener as a second logical message.
+  if (isFormSubmissionMessage(message)) return false;
   const attachments = normalizeAttachmentPayload(message.attachments);
   if (!attachments?.length) return false;
   if (message.metadata.attachment === true) return true;
@@ -5139,6 +5533,78 @@ function normalizeRequiredAttachment(value: unknown): ChatAttachment {
   return attachment;
 }
 
+function normalizeAttachmentEncryption(value: unknown): ChatAttachmentEncryption | null {
+  if (!isRecord(value) || value.v !== 1 || value.alg !== "A256GCM") return null;
+  const keyB64 = firstString(value.keyB64);
+  const ivB64 = firstString(value.ivB64);
+  const plaintextSha256B64 = firstString(value.plaintextSha256B64);
+  const ciphertextSha256B64 = firstString(value.ciphertextSha256B64);
+  const plaintextSize =
+    typeof value.plaintextSize === "number" && Number.isSafeInteger(value.plaintextSize)
+      ? value.plaintextSize
+      : -1;
+  const ciphertextSize =
+    typeof value.ciphertextSize === "number" && Number.isSafeInteger(value.ciphertextSize)
+      ? value.ciphertextSize
+      : -1;
+  if (
+    !keyB64 ||
+    !ivB64 ||
+    !plaintextSha256B64 ||
+    !ciphertextSha256B64 ||
+    plaintextSize < 0 ||
+    ciphertextSize <= plaintextSize
+  ) {
+    return null;
+  }
+  try {
+    if (
+      base64ToBytes(keyB64).length !== 32 ||
+      base64ToBytes(ivB64).length !== 12 ||
+      base64ToBytes(plaintextSha256B64).length !== 32 ||
+      base64ToBytes(ciphertextSha256B64).length !== 32
+    ) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  return {
+    v: 1,
+    alg: "A256GCM",
+    keyB64,
+    ivB64,
+    plaintextSha256B64,
+    ciphertextSha256B64,
+    plaintextSize,
+    ciphertextSize,
+  };
+}
+
+function normalizeAttachmentDownloadCapability(
+  value: unknown,
+): ChatAttachmentDownloadCapability | null {
+  if (!isRecord(value) || value.v !== 1 || value.scheme !== "LulaAttachment") {
+    return null;
+  }
+  const authorization = firstString(value.authorization);
+  const expiresAt = firstString(value.expiresAt);
+  if (
+    !authorization ||
+    !/^LulaAttachment\s+v1\.[A-Za-z0-9._-]+$/.test(authorization) ||
+    !expiresAt ||
+    !Number.isFinite(Date.parse(expiresAt))
+  ) {
+    return null;
+  }
+  return {
+    v: 1,
+    scheme: "LulaAttachment",
+    authorization,
+    expiresAt: new Date(Date.parse(expiresAt)).toISOString(),
+  };
+}
+
 function normalizeAttachment(value: unknown): ChatAttachment | null {
   if (!isRecord(value)) return null;
   const id = firstString(value.id, value.url, value.localUri, value.thumbnailUrl);
@@ -5147,6 +5613,10 @@ function normalizeAttachment(value: unknown): ChatAttachment | null {
   const metadata = isRecord(value.metadata)
     ? (value.metadata as Record<string, unknown>)
     : undefined;
+  const encryption = normalizeAttachmentEncryption(value.encryption);
+  const downloadCapability = normalizeAttachmentDownloadCapability(
+    value.downloadCapability,
+  );
   return removeUndefinedValues({
     id,
     type,
@@ -5168,6 +5638,8 @@ function normalizeAttachment(value: unknown): ChatAttachment | null {
         ? Math.max(0, Math.floor(value.height))
         : undefined,
     metadata,
+    encryption: encryption ?? undefined,
+    downloadCapability: downloadCapability ?? undefined,
   }) as ChatAttachment;
 }
 
