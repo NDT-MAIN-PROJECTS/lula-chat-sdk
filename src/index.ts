@@ -1264,6 +1264,25 @@ export type ChatThreadGoneEvent = {
   raw?: unknown;
 };
 
+/**
+ * A notice the server itself sent this account, such as a scheduled meeting
+ * being canceled. It rides the chat connection so an app that is already
+ * connected learns about it immediately, without polling an API for it.
+ *
+ * Only a stanza whose sender is the bare XMPP domain becomes one of these.
+ * Accounts cannot send as the domain, so no user can forge a server event.
+ */
+export type ChatServerEvent = {
+  /** Stanza id. The server keeps it stable for one event, so it doubles as a dedupe key. */
+  id: string;
+  /** What happened, e.g. `calendar_canceled`. */
+  type: string;
+  /** The event's payload, whose shape depends on `type`. */
+  data: Record<string, unknown>;
+  timestamp: number;
+  raw?: unknown;
+};
+
 export type ChatDeliveryEvent = {
   id: string;
   fromUserId: string;
@@ -1467,6 +1486,8 @@ export type ChatClient = {
   ) => Unsubscribe;
   onGroupInvitation: (listener: (event: ChatGroupInvitationEvent) => void) => Unsubscribe;
   onThreadGone: (listener: (event: ChatThreadGoneEvent) => void) => Unsubscribe;
+  /** Emits only events sent by the server itself — see `ChatServerEvent`. */
+  onServerEvent: (listener: (event: ChatServerEvent) => void) => Unsubscribe;
   /** Emits only XEP-0424 retractions whose author was verified by the SDK. */
   onRetraction: (listener: (event: ChatRetractionEvent) => void) => Unsubscribe;
   onTyping: (listener: (event: ChatTypingEvent) => void) => Unsubscribe;
@@ -1555,6 +1576,8 @@ const XMPP_MUC_NS = "http://jabber.org/protocol/muc";
 const XMPP_MUC_USER_NS = "http://jabber.org/protocol/muc#user";
 const XMPP_DIRECT_MUC_INVITE_NS = "jabber:x:conference";
 export const XMPP_EMERGENCY_NS = "urn:lulafi:emergency:1" as const;
+/** Namespace of the `<event>` element a server event carries — see `ChatServerEvent`. */
+export const XMPP_SERVER_EVENT_NS = "urn:lulafi:server-event:1" as const;
 const OMEMO_NS = "eu.siacs.conversations.axolotl";
 const OMEMO_DEVICELIST_NODE = "eu.siacs.conversations.axolotl.devicelist";
 const OMEMO_BUNDLE_NODE_PREFIX = "eu.siacs.conversations.axolotl.bundles:";
@@ -1738,6 +1761,8 @@ class LulaChatClient implements ChatClient {
   private readonly typingListeners = new Set<(event: ChatTypingEvent) => void>();
 
   private readonly threadGoneListeners = new Set<(event: ChatThreadGoneEvent) => void>();
+
+  private readonly serverEventListeners = new Set<(event: ChatServerEvent) => void>();
 
   private readonly retractionListeners = new Set<(event: ChatRetractionEvent) => void>();
 
@@ -2695,6 +2720,10 @@ class LulaChatClient implements ChatClient {
     return addListener(this.threadGoneListeners, listener);
   }
 
+  public onServerEvent(listener: (event: ChatServerEvent) => void): Unsubscribe {
+    return addListener(this.serverEventListeners, listener);
+  }
+
   public onRetraction(listener: (event: ChatRetractionEvent) => void): Unsubscribe {
     return addListener(this.retractionListeners, listener);
   }
@@ -3423,6 +3452,26 @@ class LulaChatClient implements ChatClient {
       return;
     }
     if (!stanza.is?.("message")) return;
+
+    // Checked on the stanza as delivered, never on a carbon's inner copy: the
+    // server addresses these to each account directly, so one that arrives any
+    // other way is not a server event.
+    if (stanza.getChild?.("event", XMPP_SERVER_EVENT_NS)) {
+      const serverEvent = parseChatServerEvent(stanza, this.config.domain);
+      if (serverEvent) {
+        this.log("debug", "chat_server_event_received", {
+          id: serverEvent.id,
+          type: serverEvent.type,
+        });
+        this.emit(this.serverEventListeners, serverEvent);
+      } else {
+        this.log("warn", "chat_server_event_rejected", {
+          id: stanza.attrs?.id,
+          from: addressToString(stanza.attrs?.from),
+        });
+      }
+      return;
+    }
 
     const carbon = this.unwrapCarbonMessage(stanza);
     const messageStanza = carbon?.message ?? stanza;
@@ -5728,6 +5777,38 @@ function parseDelayTimestamp(stanza: XmppElementLike): number | undefined {
   if (!stamp) return undefined;
   const parsed = Date.parse(stamp);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * The server event a message stanza carries, or null when it carries none or
+ * cannot be trusted. Trusted means sent by the bare `xmppDomain` itself: the
+ * server stamps every account's stanzas with that account's address, so no
+ * account can produce this sender.
+ *
+ * Wire format: `<event xmlns="urn:lulafi:server-event:1" type="…">` holding the
+ * base64 of a JSON object, on a message with a stable `id`.
+ */
+export function parseChatServerEvent(
+  stanza: XmppElementLike,
+  xmppDomain: string,
+): ChatServerEvent | null {
+  const element = stanza.getChild?.("event", XMPP_SERVER_EVENT_NS);
+  if (!element) return null;
+  const from = addressToString(stanza.attrs?.from)?.trim().toLowerCase();
+  const domain = normalizeXmppDomain(xmppDomain)?.toLowerCase();
+  if (!from || !domain || from !== domain) return null;
+  const id = trimToUndefined(stanza.attrs?.id);
+  const type = trimToUndefined(element.attrs?.type);
+  const encoded = trimToUndefined(element.getText?.());
+  const data = encoded ? decodeJsonBase64(encoded) : null;
+  if (!id || !type || !isRecord(data)) return null;
+  return {
+    id,
+    type,
+    data,
+    timestamp: parseDelayTimestamp(stanza) ?? Date.now(),
+    raw: stanza,
+  };
 }
 
 function parseMetadataTimestamp(metadata?: Record<string, unknown>): number | undefined {

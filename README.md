@@ -365,6 +365,7 @@ message bodies.
 - `onFormSubmission(listener)` for structured form submission payloads.
 - `onConversationState(listener)` for typed form-conversation open/closed control events. These events are not emitted by `onChatMessage()`.
 - `onThreadGone(listener)` for standard XEP-0085 `<gone/>` events keyed by the stanza `<thread>` value.
+- `onServerEvent(listener)` for notices the server itself sends this account (for example `calendar_canceled`), as `{ id, type, data }`. Only stanzas from the bare XMPP domain are accepted, so accounts cannot forge them. `parseChatServerEvent(stanza, xmppDomain)` exposes the same parsing.
 - `onRetraction(listener)` for author-verified XEP-0424 message retractions.
 - `onEmergency(listener)` for typed SOS messages. Emergency messages are not emitted by `onChatMessage()`.
 - `onTyping(listener)` for composing and paused states.
