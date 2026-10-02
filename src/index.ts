@@ -1,3 +1,7 @@
+import { getMessageEditError, type ChatMessageEditTarget } from "./message-edit.js";
+export { CHAT_MESSAGE_EDIT_WINDOW_MS, getMessageEditError, isMessageEditWithinWindow } from "./message-edit.js";
+export type { ChatMessageEditTarget, ChatMessageEditError } from "./message-edit.js";
+
 import { gcm } from "@noble/ciphers/aes.js";
 import { x25519 } from "@noble/curves/ed25519.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
@@ -808,6 +812,9 @@ export type ChatClientBaseConfig = {
    * closed and no authoritative retraction event is emitted.
    */
   resolveMessageAuthor?: ChatMessageAuthorResolver;
+  /** Persistent original-message lookup for edit validation after a restart. */
+  resolveMessageForEdit?: (input: ChatMessageAuthorResolverInput) =>
+    Promise<ChatMessageEditTarget | null | undefined> | ChatMessageEditTarget | null | undefined;
 
   /** Optional logger for connection, encryption, and stanza errors. */
   logger?: ChatLogger;
@@ -916,6 +923,14 @@ export type ChatTextMessageInput = Omit<ChatMessageInput, "metadata"> & {
   /** Any additional metadata for the text message. */
   metadata?: Record<string, unknown>;
   context?: ChatMessageContext;
+};
+
+export type ChatEditMessageInput = ChatTextMessageInput & {
+  roomId: string;
+  targetMessageId: string;
+  /** Only for replay of a stable edit ID already acknowledged by the server.
+   * Persist the acknowledgement locally; never obtain this from wire metadata. */
+  serverAcceptedAt?: number;
 };
 
 export type ChatReplyMessageInput = ChatTextMessageInput & {
@@ -1414,6 +1429,7 @@ export type ChatClient = {
       options?: Omit<ChatTextMessageInput, "roomId" | "body">,
     ): Promise<string>;
   };
+  editMessage: (message: ChatEditMessageInput) => Promise<string>;
   sendEmergency: (message: ChatEmergencyMessageInput) => Promise<string>;
   sendReply: (message: ChatReplyMessageInput) => Promise<string>;
   addReaction: (message: ChatReactionMessageInput) => Promise<string>;
@@ -1817,6 +1833,9 @@ class LulaChatClient implements ChatClient {
 
   private readonly roomPeers = new Map<string, Set<string>>();
 
+  private readonly editTargets = new Map<string, ChatMessageEditTarget>();
+  private readonly pendingEdits = new Map<string, { message: ChatMessage; delivery: ChatIncomingDeliveryContext }>();
+
   private readonly messageAuthorsByRoom = new Map<string, Map<string, string>>();
 
   private readonly pendingRetractionsByRoom = new Map<
@@ -1961,6 +1980,30 @@ class LulaChatClient implements ChatClient {
         targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId,
       },
       "user",
+    );
+  }
+
+  public async editMessage(input: ChatEditMessageInput): Promise<string> {
+    if (!input.roomId.trim() || !input.targetMessageId.trim())
+      throw new Error("chat_edit_original_not_found");
+    if (input.attachments?.length) throw new Error("chat_edit_not_allowed");
+    if (
+      input.serverAcceptedAt !== undefined &&
+      (!input.id || !Number.isFinite(input.serverAcceptedAt) || input.serverAcceptedAt <= 0)
+    ) {
+      throw new Error("chat_edit_acceptance_invalid");
+    }
+    return this.sendMessageInput(
+      {
+        ...input,
+        metadata: buildChatMessageMetadata({
+          ...input,
+          displayName: this.config.displayName,
+          metadata: { ...input.metadata, edited: true, replacesId: input.targetMessageId },
+        }),
+      },
+      "user",
+      input.serverAcceptedAt,
     );
   }
 
@@ -2339,6 +2382,7 @@ class LulaChatClient implements ChatClient {
   private async sendMessageInput(
     input: ChatMessageInput,
     defaultTargetScope: ChatTargetScope,
+    editServerAcceptedAt?: number,
   ): Promise<string> {
     const messageBody = input.body ?? "";
     const attachments = normalizeAttachmentPayload(input.attachments);
@@ -2358,6 +2402,27 @@ class LulaChatClient implements ChatClient {
       throw new Error("chat_attachment_download_capability_required");
     }
     const metadata = normalizeMessageMetadata(input.metadata, "CHAT_MESSAGE");
+    const editTargetId = trimToUndefined(typeof metadata.replacesId === "string" ? metadata.replacesId : undefined);
+    const isEdit = metadata.edited === true;
+    // replacesId also appears on legacy local-to-canonical ID notifications.
+    // Without the edit flag it is an alias, not a correction, and stays local.
+    if (!isEdit) delete metadata.replacesId;
+    let originalForEdit: ChatMessageEditTarget | null | undefined;
+    if (isEdit) {
+      if (!editTargetId || metadata.edited !== true || metadata.messageType !== "CHAT_MESSAGE" || attachments?.length || !input.roomId) {
+        throw new Error("chat_edit_not_allowed");
+      }
+      originalForEdit = await this.resolveEditTarget(input.roomId, editTargetId);
+      const error = getMessageEditError(originalForEdit, this.getDeviceId() ?? "");
+      if (error && !(error === "chat_edit_expired" && editServerAcceptedAt !== undefined)) throw new Error(error);
+      // A receiver uses this immutable event creation time, never its receipt time.
+      const editTimestamp = parseMetadataTimestamp(metadata) ?? Date.now();
+      const timestampError = getMessageEditError(originalForEdit, this.getDeviceId() ?? "", editTimestamp);
+      if (timestampError) throw new Error(timestampError);
+      metadata.sentAtMs = editTimestamp;
+    } else if (!parseMetadataTimestamp(metadata)) {
+      metadata.sentAtMs = Date.now();
+    }
 
     await this.connect();
     const xmpp = this.requireXmpp();
@@ -2437,6 +2502,12 @@ class LulaChatClient implements ChatClient {
           children.push(xml("markable", { xmlns: XMPP_CHAT_MARKERS_NS }));
         }
 
+        // Connecting, joining a group and encryption can outlive the window.
+        if (isEdit && editServerAcceptedAt === undefined) {
+          originalForEdit = await this.resolveEditTarget(input.roomId!, editTargetId!);
+          const error = getMessageEditError(originalForEdit, this.getDeviceId() ?? "");
+          if (error) throw new Error(error);
+        }
         await xmpp.send(
           xml(
             "message",
@@ -2467,6 +2538,10 @@ class LulaChatClient implements ChatClient {
     }
     if (roomId) {
       this.rememberMessageAuthor(roomId, id, this.getDeviceId());
+      if (!isEdit) this.rememberEditTarget(roomId, id, {
+        authorAddress: this.getDeviceId() ?? "", timestamp: parseMetadataTimestamp(metadata)!,
+        body: messageBody, hasAttachments: Boolean(attachments?.length), metadata,
+      });
     }
     return id;
   }
@@ -3810,7 +3885,7 @@ class LulaChatClient implements ChatClient {
       },
     };
     this.rememberMessageAuthor(roomId, emittedMessageId, originalAuthorAddress);
-    this.emitMessage(message, delivery);
+    await this.emitValidatedMessage(message, delivery);
     this.flushPendingRetraction(roomId, emittedMessageId, originalAuthorAddress);
     this.log("debug", "chat_message_received", {
       id: emittedMessageId,
@@ -3819,10 +3894,6 @@ class LulaChatClient implements ChatClient {
       messageType: metadata.messageType,
       hasAttachments: Boolean(attachments?.length),
     });
-
-    if (this.config.deliveryReceiptMode === "automatic") {
-      await delivery.acknowledgeDelivered();
-    }
   }
 
   private async sendReceipt(input: {
@@ -4309,6 +4380,8 @@ class LulaChatClient implements ChatClient {
       return;
     }
 
+    const original = this.editTargets.get(this.editTargetKey(event.roomId, event.targetMessageId));
+    if (original) original.metadata = { ...original.metadata, retracted: true };
     this.emit(this.retractionListeners, event);
     this.log("debug", "chat_message_retraction_received", {
       id: event.id,
@@ -4375,6 +4448,120 @@ class LulaChatClient implements ChatClient {
         listener(event);
       } catch (error) {
         this.log("error", "chat_listener_error", { error });
+      }
+    }
+  }
+
+  private editTargetKey(roomId: string, messageId: string): string {
+    return JSON.stringify([roomId, messageId]);
+  }
+
+  private rememberEditTarget(
+    roomId: string,
+    messageId: string,
+    target: ChatMessageEditTarget,
+  ): void {
+    const key = this.editTargetKey(roomId, messageId);
+    // A replay of the original must never reset its timestamp or undo a tombstone.
+    if (!this.editTargets.has(key)) this.editTargets.set(key, target);
+    while (this.editTargets.size > 2000)
+      this.editTargets.delete(this.editTargets.keys().next().value!);
+  }
+
+  private async resolveEditTarget(
+    roomId: string,
+    messageId: string,
+  ): Promise<ChatMessageEditTarget | null | undefined> {
+    // Persistent state knows about deletions and survives runtime-cache eviction.
+    const persisted = await this.config.resolveMessageForEdit?.({ roomId, messageId });
+    if (this.config.resolveMessageForEdit) return persisted;
+    return this.editTargets.get(this.editTargetKey(roomId, messageId));
+  }
+
+  private async emitValidatedMessage(
+    message: ChatMessage,
+    delivery: ChatIncomingDeliveryContext,
+  ): Promise<void> {
+    const targetId =
+      typeof message.metadata.replacesId === "string" ? message.metadata.replacesId.trim() : "";
+    if (message.metadata.edited === true && targetId) {
+      const original = await this.resolveEditTarget(message.roomId, targetId);
+      if (!original) {
+        this.pendingEdits.set(this.editTargetKey(message.roomId, message.id), {
+          message,
+          delivery,
+        });
+        while (this.pendingEdits.size > 200)
+          this.pendingEdits.delete(this.pendingEdits.keys().next().value!);
+        return; // No durable acknowledgement until the original can be validated.
+      }
+      const error = getMessageEditError(
+        original,
+        message.fromFullAddress || message.fromDeviceId,
+        message.timestamp,
+      );
+      if (
+        error ||
+        message.metadata.messageType !== "CHAT_MESSAGE" ||
+        message.attachments?.length ||
+        !message.body.trim()
+      ) {
+        this.log("warn", "chat_edit_rejected", {
+          id: message.id,
+          reason: error ?? "chat_edit_not_allowed",
+        });
+        await delivery.acknowledgeDelivered();
+        return;
+      }
+      this.emitMessage(message, delivery);
+      if (this.config.deliveryReceiptMode === "automatic") await delivery.acknowledgeDelivered();
+      return;
+    }
+    if (message.metadata.edited === true || (targetId && message.metadata.edited)) {
+      this.log("warn", "chat_edit_rejected", { id: message.id, reason: "chat_edit_not_allowed" });
+      await delivery.acknowledgeDelivered();
+      return;
+    }
+    delete message.metadata.replacesId;
+    const target: ChatMessageEditTarget = {
+      authorAddress: message.fromFullAddress || message.fromDeviceId,
+      timestamp: message.timestamp,
+      body: message.body,
+      hasAttachments: Boolean(message.attachments?.length),
+      metadata: message.metadata,
+    };
+    this.rememberEditTarget(message.roomId, message.id, target);
+    if (message.metadata.originId)
+      this.rememberEditTarget(message.roomId, message.metadata.originId, target);
+    this.emitMessage(message, delivery);
+    if (this.config.deliveryReceiptMode === "automatic") await delivery.acknowledgeDelivered();
+    // Consumers persist the original asynchronously. Runtime data is safe here:
+    // the original has just arrived from transport, even before persistence ends.
+    for (const [key, pending] of Array.from(this.pendingEdits)) {
+      if (
+        pending.message.roomId !== message.roomId ||
+        ![message.id, message.metadata.originId].includes(
+          String(pending.message.metadata.replacesId),
+        )
+      )
+        continue;
+      this.pendingEdits.delete(key);
+      const error = getMessageEditError(
+        target,
+        pending.message.fromFullAddress || pending.message.fromDeviceId,
+        pending.message.timestamp,
+      );
+      if (
+        !error &&
+        pending.message.metadata.messageType === "CHAT_MESSAGE" &&
+        !pending.message.attachments?.length &&
+        pending.message.body.trim()
+      ) {
+        this.emitMessage(pending.message, pending.delivery);
+        if (this.config.deliveryReceiptMode === "automatic")
+          await pending.delivery.acknowledgeDelivered();
+      } else {
+        await pending.delivery.acknowledgeDelivered();
       }
     }
   }
@@ -4942,6 +5129,9 @@ type NormalizedConfig = {
   roomDirectory?: ChatRoomDirectory;
   resolveRoomDeviceIds?: (roomId: string) => Promise<DeviceId[]> | DeviceId[];
   resolveMessageAuthor?: ChatMessageAuthorResolver;
+  /** Persistent original-message lookup for edit validation after a restart. */
+  resolveMessageForEdit?: (input: ChatMessageAuthorResolverInput) =>
+    Promise<ChatMessageEditTarget | null | undefined> | ChatMessageEditTarget | null | undefined;
   logger?: ChatLogger;
   logLevel: ChatLogLevel;
   encryption?: ChatEncryption;
@@ -4988,6 +5178,7 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
     roomDirectory: config.roomDirectory,
     resolveRoomDeviceIds: config.resolveRoomDeviceIds,
     resolveMessageAuthor: config.resolveMessageAuthor,
+    resolveMessageForEdit: config.resolveMessageForEdit,
     logger: config.logger,
     logLevel: normalizeLogLevel(config.logLevel, config.logger),
     encryption: config.encryption,

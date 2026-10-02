@@ -20,16 +20,17 @@
     "README.md"
   ],
   "scripts": {
-    "build": "npm run test && npm run clean && npm run build:js && npm run build:types",
+    "build": "npm run test && npm run clean && npm run build:js && npm run build:types && npm run test:unit",
     "build:js": "tsup",
     "build:types": "tsc -p tsconfig.build.json",
-    "build:nodocs": "npm run test && npm run clean && npm run build:js && npm run build:types",
+    "build:nodocs": "npm run test && npm run clean && npm run build:js && npm run build:types && npm run test:unit",
     "clean": "rimraf dist",
     "start": "npm run build:js -- --watch",
     "test": "npm run typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bump": "npm version prerelease",
-    "start:test-client": "python3 -m http.server 8080"
+    "start:test-client": "python3 -m http.server 8080",
+    "test:unit": "node --test tests/*.test.mjs"
   },
   "publishConfig": {
     "access": "restricted"

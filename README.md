@@ -724,3 +724,65 @@ const chatClient = init({
 The SDK owns connection state, OMEMO device discovery, listeners, receipts,
 typing states, and message IDs. The XMPP server owns resource routing and
 Message Carbon delivery.
+
+## Editing messages
+
+Text messages can be edited by their original author for **15 minutes from the
+original send time**. Subsequent edits do not extend the window. Attachments,
+form submissions, emergency messages and deleted messages cannot be edited.
+
+```ts
+await chatClient.editMessage({
+  roomId: "room-id",
+  targetMessageId: "original-message-id",
+  body: "Corrected text",
+});
+```
+
+The SDK checks both the dedicated edit API and corrections passed to generic
+send APIs. It checks again immediately before transport because connecting,
+joining a group and encryption can outlive the window. Applications can use
+`isMessageEditWithinWindow(originalTimestamp)` for menus and
+`getMessageEditError(original, editorAddress)` for the full policy.
+
+Supply `resolveMessageForEdit` in the client configuration to resolve an
+original message from persistent storage, including canonical/local ID aliases:
+
+```ts
+resolveMessageForEdit: async ({ roomId, messageId }) => {
+  const original = await messageStore.findByIdOrAlias(roomId, messageId);
+  if (!original) return null;
+  return {
+    authorAddress: original.senderId,
+    timestamp: original.timestamp,
+    body: original.body,
+    hasAttachments: Boolean(original.attachments?.length),
+    ...(original.metadata ? { metadata: original.metadata } : {}),
+  };
+},
+```
+
+Without a resolver the SDK uses a bounded runtime cache of originals. A supplied
+resolver is authoritative, including missing or deleted originals. Incoming
+corrections are checked against their creation timestamp rather than the time
+of receipt, so valid edits can arrive later on offline devices. Unknown originals
+are deferred in a bounded queue; in manual receipt mode they are not acknowledged
+until the application persists the validated correction.
+
+Consumers merge corrections using encrypted `edited` / `replacesId` metadata.
+Preserve the original message ID, sender and timestamp; change only text and
+supported text metadata. Use the latest edit creation timestamp (and event ID to
+break ties) so out-of-order corrections cannot undo newer text.
+
+Durable outboxes must discard edits not yet accepted when the window expires.
+To replay an already acknowledged edit after expiry, pass its stable `id`,
+original edit `metadata.sentAtMs` and locally persisted `serverAcceptedAt` to
+`editMessage`. This acknowledgement must come from the sender's outbox, never
+from incoming wire metadata. Receiving clients still validate the edit's original
+creation time and authorship.
+
+These are client policy checks. Sender timestamps are not a server-trusted clock;
+strict enforcement against modified clients requires a separate server protocol.
+The current protocol remains encrypted and does not require ejabberd changes.
+
+`npm run build` runs type checks, builds the package, and runs the Node tests.
