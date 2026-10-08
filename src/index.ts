@@ -10,6 +10,14 @@ import { randomBytes as nobleRandomBytes, utf8ToBytes } from "@noble/hashes/util
 import { client as createXmppClient, xml } from "@xmpp/client";
 import { customAlphabet } from "nanoid/non-secure";
 import saslMechanisms from "saslmechanisms";
+import {
+  createStoredOmemoDiscoveryCache,
+  createOmemoDiscoveryReader,
+  type OmemoDiscoveryCacheStore,
+  type OmemoDiscoverySnapshot,
+} from "./omemoDiscoveryCache.js";
+export { createInMemoryOmemoDiscoveryCache } from "./omemoDiscoveryCache.js";
+export type { OmemoDiscoveryCacheStore, OmemoDiscoverySnapshot } from "./omemoDiscoveryCache.js";
 
 export type Unsubscribe = () => void;
 
@@ -1395,6 +1403,8 @@ export type ChatEncryptionContext = {
 
 export type ChatEncryption = {
   onConnect?: (context: ChatEncryptionContext) => Promise<void> | void;
+  onDisconnect?: (context: ChatEncryptionContext) => void;
+  onStanza?: (stanza: XmppElementLike, context: ChatEncryptionContext) => Promise<void> | void;
   encrypt: (
     input: ChatEncryptInput,
     context: ChatEncryptionContext,
@@ -1408,6 +1418,10 @@ export type ChatEncryption = {
 export type OmemoEncryptionOptions = {
   storage?: ChatKeyValueStore;
   stateKeyPrefix?: string;
+  /** Public discovery records. Defaults to a memory cache backed by `storage`. */
+  discoveryCache?: OmemoDiscoveryCacheStore;
+  discoveryRefreshAfterMs?: number;
+  discoveryMaxAgeMs?: number;
 };
 
 export type ChatClient = {
@@ -1868,6 +1882,7 @@ class LulaChatClient implements ChatClient {
 
   public async stop(): Promise<void> {
     this.log("info", "chat_stop_requested", { status: this.status });
+    this.config.encryption?.onDisconnect?.(this.getEncryptionContext());
     this.setStatus("stopping");
     for (const timer of this.typingAutoPauseTimers.values()) {
       clearTimeout(timer);
@@ -1881,8 +1896,10 @@ class LulaChatClient implements ChatClient {
     this.mucOccupantRealJids.clear();
     this.clearAllGroupJoinRetries();
     this.rejectPendingGroupJoins(new Error("chat_client_stopped"));
+    this.rejectPendingIq(new Error("chat_client_stopped"));
     this.rejectServerAckWaiters(new Error("chat_client_stopped"));
     if (current) {
+      current.reconnect.stop();
       await current.stop();
     }
     this.setStatus("offline");
@@ -2384,6 +2401,7 @@ class LulaChatClient implements ChatClient {
     defaultTargetScope: ChatTargetScope,
     editServerAcceptedAt?: number,
   ): Promise<string> {
+    const sendStartedAt = Date.now();
     const messageBody = input.body ?? "";
     const attachments = normalizeAttachmentPayload(input.attachments);
     if (!messageBody.trim() && !attachments?.length) throw new Error("chat_body_required");
@@ -2518,6 +2536,9 @@ class LulaChatClient implements ChatClient {
       });
       if (serverAckPromise) {
         this.updateServerAckExpectedTargets(id, sentTargets);
+        // Ask after the message writes. The library's trailing debounce can
+        // defer acknowledgements throughout a continuous run of stanzas.
+        await xmpp.send(xml("r", { xmlns: XMPP_STREAM_MANAGEMENT_NS }));
         await serverAckPromise;
       }
     } catch (error) {
@@ -2526,6 +2547,7 @@ class LulaChatClient implements ChatClient {
     }
     this.log("info", "chat_message_sent", {
       id,
+      durationMs: Date.now() - sendStartedAt,
       roomId,
       targetRoomId,
       targetScope,
@@ -2879,6 +2901,9 @@ class LulaChatClient implements ChatClient {
   }
 
   private async connectFresh(): Promise<void> {
+    if (this.xmpp) {
+      await this.stop();
+    }
     this.setStatus("connecting");
     this.log("info", "chat_connect_started", {
       service: this.config.service,
@@ -2978,6 +3003,7 @@ class LulaChatClient implements ChatClient {
 
   private bindXmppEvents(xmpp: XmppClientLike): void {
     xmpp.on("online", (address: unknown) => {
+      if (this.xmpp !== xmpp) return;
       this.onlineDeviceId = addressToString(address) ?? this.config.deviceId;
       this.onlineReadinessPromise = (async () => {
         const streamManagement = xmpp.streamManagement as XmppStreamManagementLike;
@@ -2990,6 +3016,7 @@ class LulaChatClient implements ChatClient {
         const streamManagementEnabled = streamManagementRequired
           ? await this.waitForStreamManagementNegotiation(xmpp)
           : streamManagement.enabled === true;
+        if (this.xmpp !== xmpp) return;
         if (streamManagementRequired && !streamManagementEnabled) {
           throw new Error("chat_stream_management_required");
         }
@@ -3020,7 +3047,9 @@ class LulaChatClient implements ChatClient {
           this.log("error", "chat_encryption_connect_failed", { error });
           this.emit(this.errorListeners, { error });
         }
+        if (this.xmpp !== xmpp) return;
         await this.rejoinGroupRooms();
+        if (this.xmpp !== xmpp) return;
         this.setStatus("online");
         this.log("info", "chat_online", {
           deviceId: this.onlineDeviceId,
@@ -3028,12 +3057,15 @@ class LulaChatClient implements ChatClient {
         });
       })();
       this.onlineReadinessPromise.catch((error) => {
+        if (this.xmpp !== xmpp) return;
         this.setStatus("error", error);
         this.emit(this.errorListeners, { error });
       });
     });
 
     xmpp.on("offline", () => {
+      if (this.xmpp !== xmpp) return;
+      this.config.encryption?.onDisconnect?.(this.getEncryptionContext());
       this.setStatus("offline");
       this.onlineDeviceId = undefined;
       this.onlineReadinessPromise = null;
@@ -3047,12 +3079,14 @@ class LulaChatClient implements ChatClient {
     });
 
     xmpp.on("error", (error: unknown) => {
+      if (this.xmpp !== xmpp) return;
       this.log("error", "chat_xmpp_error", { error });
       this.emit(this.errorListeners, { error });
       this.setStatus("error", error);
     });
 
     xmpp.on("stanza", (stanza: XmppElementLike) => {
+      if (this.xmpp !== xmpp) return;
       this.handleStanza(stanza).catch((error: unknown) => {
         this.emit(this.errorListeners, { error, raw: stanza });
       });
@@ -3124,6 +3158,7 @@ class LulaChatClient implements ChatClient {
   private bindStreamManagementEvents(xmpp: XmppClientLike): void {
     const streamManagement = xmpp.streamManagement as XmppStreamManagementLike;
     streamManagement.on?.("ack", (stanza) => {
+      if (this.xmpp !== xmpp) return;
       if (!stanza || (!stanza.is?.("message") && stanza.name !== "message")) return;
       const id = trimToUndefined(stanza.attrs?.id);
       if (!id) return;
@@ -3144,6 +3179,7 @@ class LulaChatClient implements ChatClient {
       });
     });
     streamManagement.on?.("fail", (stanza) => {
+      if (this.xmpp !== xmpp) return;
       if (!stanza || (!stanza.is?.("message") && stanza.name !== "message")) return;
       const id = trimToUndefined(stanza.attrs?.id);
       if (!id) return;
@@ -3168,6 +3204,7 @@ class LulaChatClient implements ChatClient {
       });
     });
     streamManagement.on?.("resumed", () => {
+      if (this.xmpp !== xmpp) return;
       this.setStatus("online");
       this.emit(this.streamManagementListeners, {
         state: "resumed",
@@ -3527,6 +3564,7 @@ class LulaChatClient implements ChatClient {
       return;
     }
     if (!stanza.is?.("message")) return;
+    await this.config.encryption?.onStanza?.(stanza, this.getEncryptionContext());
 
     // Checked on the stanza as delivered, never on a carbon's inner copy: the
     // server addresses these to each account directly, so one that arrives any
@@ -4608,6 +4646,19 @@ export function createOmemoEncryption(
   let cachedState: OmemoState | null = null;
   let publishedBareJid: string | null = null;
   let identityPublishPromise: Promise<void> | null = null;
+  const refreshAfterMs = Math.max(1000, options.discoveryRefreshAfterMs ?? 30_000);
+  let discoveryLogger: ChatLogger | undefined;
+  const discoveryStore = options.discoveryCache ?? createStoredOmemoDiscoveryCache(
+    storage, stateKeyPrefix,
+    (error) => discoveryLogger?.warn?.("chat_omemo_cache_storage_failed", { error }),
+  );
+  const discovery = createOmemoDiscoveryReader(
+    discoveryStore,
+    { refreshAfterMs, maxAgeMs: Math.max(refreshAfterMs, options.discoveryMaxAgeMs ?? 120_000) },
+  );
+  const subscriptions = new Map<string, { peer: string; node: string; promise: Promise<void> }>();
+  const watchedPeers = new Map<string, true>();
+  let connectionEpoch = 0;
 
   const stateKey = (bareJid: string) => `${stateKeyPrefix}:${bareJid}`;
 
@@ -4620,14 +4671,18 @@ export function createOmemoEncryption(
     },
     operation: string,
   ): Promise<XmppElementLike> => {
+    const startedEpoch = connectionEpoch;
     let lastError: unknown;
     for (let attempt = 1; attempt <= OMEMO_IQ_MAX_ATTEMPTS; attempt += 1) {
+      if (startedEpoch !== connectionEpoch) throw new Error("xmpp_omemo_cache_reset");
       try {
         return await context.sendIq({
           ...input,
           timeoutMs: OMEMO_IQ_TIMEOUT_MS,
         });
       } catch (error) {
+        if (startedEpoch !== connectionEpoch) throw new Error("xmpp_omemo_cache_reset");
+        if (error instanceof Error && error.message.startsWith("chat_iq_error:")) throw error;
         lastError = error;
         if (attempt === OMEMO_IQ_MAX_ATTEMPTS) break;
         context.logger?.warn?.("chat_omemo_iq_retry", {
@@ -4807,32 +4862,7 @@ export function createOmemoEncryption(
       ),
     );
 
-    await sendOmemoIq(
-      context,
-      {
-        type: "set",
-        payload: xml(
-          "pubsub",
-          { xmlns: PUBSUB_NS },
-          xml(
-            "publish",
-            { node: OMEMO_DEVICELIST_NODE },
-            xml(
-              "item",
-              { id: "current" },
-              xml(
-                "list",
-                { xmlns: OMEMO_NS },
-                ...finalDeviceIds.map((deviceId) => xml("device", { id: String(deviceId) })),
-              ),
-            ),
-          ),
-          publishOptions,
-        ),
-      },
-      "publish-devices",
-    );
-
+    // Advertise a device after its key is available to subscribers.
     await sendOmemoIq(
       context,
       {
@@ -4859,6 +4889,32 @@ export function createOmemoEncryption(
       "publish-identity",
     );
 
+    await sendOmemoIq(
+      context,
+      {
+        type: "set",
+        payload: xml(
+          "pubsub",
+          { xmlns: PUBSUB_NS },
+          xml(
+            "publish",
+            { node: OMEMO_DEVICELIST_NODE },
+            xml(
+              "item",
+              { id: "current" },
+              xml(
+                "list",
+                { xmlns: OMEMO_NS },
+                ...finalDeviceIds.map((deviceId) => xml("device", { id: String(deviceId) })),
+              ),
+            ),
+          ),
+          publishOptions,
+        ),
+      },
+      "publish-devices",
+    );
+
     publishedBareJid = bareJid;
     context.logger?.debug?.("chat_omemo_identity_published", {
       bareJid,
@@ -4874,7 +4930,7 @@ export function createOmemoEncryption(
     if (!bareJid || publishedBareJid === bareJid) return Promise.resolve();
     if (identityPublishPromise) return identityPublishPromise;
 
-    identityPublishPromise = publishIdentity(context)
+    const promise = publishIdentity(context)
       .catch((error) => {
         context.logger?.warn?.("chat_omemo_identity_publish_failed", {
           bareJid,
@@ -4882,9 +4938,94 @@ export function createOmemoEncryption(
         });
       })
       .finally(() => {
-        identityPublishPromise = null;
+        if (identityPublishPromise === promise) identityPublishPromise = null;
       });
-    return identityPublishPromise;
+    identityPublishPromise = promise;
+    return promise;
+  };
+
+  const unsubscribe = (context: ChatEncryptionContext, peer: string, node: string): void => {
+    subscriptions.delete(JSON.stringify([peer, node]));
+    const subscriber = context.getDeviceId();
+    if (!subscriber) return;
+    void context.sendIq({
+      type: "set", to: peer, timeoutMs: OMEMO_IQ_TIMEOUT_MS,
+      payload: xml("pubsub", { xmlns: PUBSUB_NS }, xml("unsubscribe", { node, jid: subscriber })),
+    }).catch((error) => context.logger?.warn?.("chat_omemo_unsubscribe_failed", { peer, node, error }));
+  };
+
+  const subscribe = (context: ChatEncryptionContext, peer: string, node: string): void => {
+    const subscriber = context.getDeviceId();
+    if (!subscriber) return;
+    const subscriptionKey = JSON.stringify([peer, node]);
+    if (subscriptions.has(subscriptionKey)) return;
+    const promise = context.sendIq({
+      type: "set",
+      to: peer,
+      timeoutMs: OMEMO_IQ_TIMEOUT_MS,
+      payload: xml("pubsub", { xmlns: PUBSUB_NS },
+        xml("subscribe", { node, jid: subscriber })),
+    }).then(() => undefined).catch((error) => {
+      if (subscriptions.get(subscriptionKey)?.promise === promise) subscriptions.delete(subscriptionKey);
+      context.logger?.warn?.("chat_omemo_subscription_failed", { peer, node, error });
+    });
+    subscriptions.set(subscriptionKey, { peer, node, promise });
+  };
+
+  const fetchSnapshot = async (
+    context: ChatEncryptionContext,
+    peer: string,
+  ): Promise<OmemoDiscoverySnapshot> => {
+    const startedEpoch = connectionEpoch;
+    discoveryLogger = context.logger;
+    watchedPeers.delete(peer);
+    watchedPeers.set(peer, true);
+    if (watchedPeers.size > 128) {
+      const retiredPeer = watchedPeers.keys().next().value!;
+      watchedPeers.delete(retiredPeer);
+      discovery.invalidate(context.getBareDeviceId()!, retiredPeer);
+      for (const subscription of subscriptions.values()) {
+        if (subscription.peer === retiredPeer) unsubscribe(context, retiredPeer, subscription.node);
+      }
+    }
+    // Subscribe first. A change during discovery invalidates the pending response.
+    subscribe(context, peer, OMEMO_DEVICELIST_NODE);
+    const deviceIds = await fetchDeviceIds(context, peer);
+    if (!deviceIds.length) throw new Error("xmpp_omemo_peer_device_not_found");
+    if (deviceIds.length > 128) throw new Error("xmpp_omemo_peer_device_limit");
+    const activeNodes = new Set([OMEMO_DEVICELIST_NODE, ...deviceIds.map((id) => `${OMEMO_BUNDLE_NODE_PREFIX}${id}`)]);
+    for (const subscription of subscriptions.values()) {
+      if (subscription.peer === peer && !activeNodes.has(subscription.node)) unsubscribe(context, peer, subscription.node);
+    }
+    const state = await loadOrCreateState(context.getBareDeviceId()!);
+    const devices: OmemoDiscoverySnapshot["devices"] = [];
+    let nextIndex = 0;
+    const results = await Promise.all(
+      Array.from({ length: Math.min(4, deviceIds.length) }, async () => {
+        const found: OmemoDiscoverySnapshot["devices"] = [];
+        for (;;) {
+          const index = nextIndex++;
+          if (index >= deviceIds.length) return found;
+          const deviceId = deviceIds[index];
+          subscribe(context, peer, `${OMEMO_BUNDLE_NODE_PREFIX}${deviceId}`);
+          try {
+            const identityKey = peer === state.bareJid && deviceId === state.omemoDeviceId
+              ? base64ToBytes(state.identityPublicKey)
+              : await fetchIdentityKey(context, peer, deviceId);
+            if (identityKey.length !== 32) throw new Error("xmpp_omemo_peer_identity_key_invalid");
+            found.push({ deviceId, identityKey: bytesToBase64(identityKey) });
+          } catch (error) {
+            if (error instanceof Error && error.message === "xmpp_omemo_peer_identity_key_missing") continue;
+            throw error;
+          }
+        }
+      }),
+    );
+    if (startedEpoch !== connectionEpoch) throw new Error("xmpp_omemo_cache_reset");
+    devices.push(...results.flat());
+    devices.sort((a, b) => a.deviceId - b.deviceId);
+    if (!devices.length) throw new Error("xmpp_omemo_peer_identity_key_missing");
+    return { fetchedAt: Date.now(), devices };
   };
 
   const establishPeerSessions = async (
@@ -4899,40 +5040,57 @@ export function createOmemoEncryption(
     const state = await loadOrCreateState(bareJid);
     const ownPrivateKey = base64ToBytes(state.identityPrivateKey);
     const peerBareJid = normalizeBareDeviceId(toDeviceId);
-    const peerDeviceIds = await fetchDeviceIds(context, peerBareJid);
-    if (!peerDeviceIds.length) {
-      throw new Error("xmpp_omemo_peer_device_not_found");
-    }
-
-    const sessions: OmemoPeerSession[] = [];
-    for (const peerDeviceId of peerDeviceIds) {
-      try {
-        const peerPublicKey = await fetchIdentityKey(
-          context,
-          peerBareJid,
-          peerDeviceId,
-        );
-        sessions.push({
-          peerDeviceId,
-          sharedSecret: x25519.getSharedSecret(ownPrivateKey, peerPublicKey),
-        });
-      } catch {
-        // Skip stale peer devices with no identity bundle.
-      }
-    }
-
-    if (!sessions.length) {
-      throw new Error("xmpp_omemo_peer_identity_key_missing");
-    }
-
-    return sessions;
+    const snapshot = await discovery.get(
+      bareJid, peerBareJid, () => fetchSnapshot(context, peerBareJid),
+      (error) => context.logger?.warn?.("chat_omemo_background_refresh_failed", { peer: peerBareJid, error }),
+    );
+    return snapshot.devices.map(({ deviceId, identityKey }) => ({
+      peerDeviceId: deviceId,
+      sharedSecret: x25519.getSharedSecret(ownPrivateKey, base64ToBytes(identityKey)),
+    }));
   };
 
   return {
     onConnect: async (context) => {
       const bareJid = context.getBareDeviceId();
-      if (!bareJid || publishedBareJid === bareJid) return;
+      if (!bareJid) return;
+      connectionEpoch += 1;
+      discoveryLogger = context.logger;
+      discovery.reset();
+      subscriptions.clear();
+      watchedPeers.clear();
       await startIdentityPublish(context);
+      await discoveryStore.load?.(bareJid);
+      const peers = discoveryStore.peers?.(bareJid).slice(-8) ?? [];
+      const startedEpoch = connectionEpoch;
+      let nextPeer = 0;
+      // Recent conversations are refreshed off the connection readiness path.
+      void Promise.all(Array.from({ length: Math.min(2, peers.length) }, async () => {
+        for (;;) {
+          const peer = peers[nextPeer++];
+          if (!peer || startedEpoch !== connectionEpoch) return;
+          await discovery.refresh(bareJid, peer, () => fetchSnapshot(context, peer))
+            .catch((error) => context.logger?.warn?.("chat_omemo_background_refresh_failed", { peer, error }));
+        }
+      }));
+    },
+    onDisconnect: () => {
+      connectionEpoch += 1;
+      identityPublishPromise = null;
+      discovery.reset();
+      subscriptions.clear();
+      watchedPeers.clear();
+    },
+    onStanza: (stanza, context) => {
+      const event = stanza.getChild?.("event", "http://jabber.org/protocol/pubsub#event");
+      const peer = normalizeBareDeviceId(stanza.attrs?.from);
+      const owner = context.getBareDeviceId();
+      if (!event || !peer || !owner) return;
+      const nodes = ["items", "delete", "purge"].flatMap((name) => event.getChildren?.(name) ?? [])
+        .map((child) => child.attrs?.node ?? "");
+      if (nodes.some((node) => node === OMEMO_DEVICELIST_NODE || node.startsWith(OMEMO_BUNDLE_NODE_PREFIX))) {
+        discovery.invalidate(owner, peer);
+      }
     },
     encrypt: async (input, context) => {
       const bareJid = context.getBareDeviceId();
@@ -4958,17 +5116,15 @@ export function createOmemoEncryption(
       if (!recipientBareJids.length) {
         throw new Error("xmpp_omemo_recipient_required");
       }
-      const recipientSessions = (
+      const allRecipientJids = recipientBareJids.includes(bareJid)
+        ? recipientBareJids : [...recipientBareJids, bareJid];
+      const sessions = (
         await Promise.all(
-          recipientBareJids.map((recipientBareJid) =>
+          allRecipientJids.map((recipientBareJid) =>
             establishPeerSessions(context, recipientBareJid),
           ),
         )
       ).flat();
-      const senderSessions = recipientBareJids.includes(bareJid)
-        ? []
-        : await establishPeerSessions(context, bareJid);
-      const sessions = [...recipientSessions, ...senderSessions];
       const iv = nobleRandomBytes(12);
       const contentKey = nobleRandomBytes(OMEMO_AES_KEY_BYTES);
       const plaintext = new TextEncoder().encode(
@@ -5943,6 +6099,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, errorCode: string
 }
 
 async function safeStop(xmpp: XmppClientLike): Promise<void> {
+  xmpp.reconnect.stop();
   try {
     await xmpp.stop();
   } catch {

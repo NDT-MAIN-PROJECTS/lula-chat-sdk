@@ -302,6 +302,12 @@ chatClient.onDelivery(async (event) => {
 });
 ```
 
+With `awaitServerAcknowledgement`, the SDK requests an XEP-0198 acknowledgement
+right after each logical message's target writes. Continuous traffic cannot
+defer that request through the client's trailing acknowledgement timer.
+The `chat_message_sent` log includes `durationMs` for connection readiness,
+target lookup, encryption, writes, and the requested server acknowledgement.
+
 During a resumable disconnect, xmpp.js replays only stanzas that ejabberd has
 not acknowledged; an app-level timer must not send the same in-flight entry at
 the same time. The durable outbox is still required for process termination,
@@ -655,6 +661,29 @@ identity bundle for each numeric OMEMO device id. It performs this discovery
 for the recipient and for the sender's own account so carbon copies can be
 decrypted by the sender's other clients. Applications do not provide XMPP
 resources or per-resource recipient lists for normal chat messages.
+
+Public device lists and identity keys use a memory cache backed by the supplied
+`storage` adapter. Desktop's encrypted file and mobile's AsyncStorage retain
+these records across app restarts. Private keys and shared secrets stay outside
+the discovery records.
+
+A warm send uses the complete cached key set without a discovery request.
+Records refresh in the background after 30 seconds. Concurrent sends share one
+refresh per account. Records older than 120 seconds require a fresh lookup.
+Cold lookups fetch up to four identity bundles in parallel per account.
+
+PubSub device-list and bundle notifications invalidate cached records.
+Reconnection requires server validation before saved records can be used.
+The eight most recent accounts refresh in the background on connection.
+The cache and subscriptions cover at most 128 accounts per encryption adapter,
+with at most 128 advertised devices per account.
+
+Use `discoveryRefreshAfterMs` and `discoveryMaxAgeMs` to change the age limits.
+Pass `discoveryCache` for a custom public-data store, or
+`createInMemoryOmemoDiscoveryCache()` to keep discovery records in memory only.
+The default persistent records use keys shaped as
+`<stateKeyPrefix>:discovery:<owner bare JID>`. Account logout cleanup should
+remove those records together with the account's encryption state.
 
 ```ts
 import { createOmemoEncryption, init, storageBackends } from "@hubnet-systems/chat-sdk";
