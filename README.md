@@ -754,6 +754,27 @@ The SDK owns connection state, OMEMO device discovery, listeners, receipts,
 typing states, and message IDs. The XMPP server owns resource routing and
 Message Carbon delivery.
 
+## Message timestamps
+
+Use `ChatMessage.timestamp` for display and ordering. It is resolved Unix epoch
+milliseconds; incoming `metadata.sentAtMs` and `metadata.createdAt` remain the
+sender's original values.
+
+The receiver prefers a valid sender `sentAtMs`, then a valid legacy `createdAt`.
+Numeric timestamps must be safe integer milliseconds from 2000 onward. String
+dates must include a timezone. Sender times may be at most five minutes ahead
+of receipt time or, for delayed delivery, the earlier archive time. Invalid
+sender times fall back to the XMPP delay, then local receipt time. Forwarded
+Message Carbons preserve the delay on their forwarding wrapper. Delay dates
+are also validated against local receipt time.
+
+This preserves legitimate original send times for queued and replayed messages
+and applies regardless of which XMPP client sent them. It cannot identify
+plausible but deliberately backdated sender times: guaranteeing an authoritative
+timeline requires server-controlled timestamps. Existing app caches are not
+rewritten. Corrections require a valid original correction creation time;
+fallback receipt time cannot make an invalid correction eligible for editing.
+
 ## Editing messages
 
 Text messages can be edited by their original author for **15 minutes from the
