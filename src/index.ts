@@ -880,6 +880,7 @@ export type ChatMessage = {
   toDeviceId: DeviceId;
   roomId: string;
   body: string;
+  /** Resolved Unix epoch milliseconds for display and ordering; raw metadata is preserved separately. */
   timestamp: number;
   metadata: ChatMessageMetadata;
   attachments?: ChatAttachment[];
@@ -1588,6 +1589,7 @@ type PendingGroupJoin = {
 type CarbonForwardedMessage = {
   direction: "sent" | "received";
   message: XmppElementLike;
+  timestamp?: number;
 };
 
 const XMPP_CHAT_NS = "urn:lula:defy:chat:1";
@@ -3276,7 +3278,8 @@ class LulaChatClient implements ChatClient {
       forwarded?.getChild?.("message", "jabber:client") ??
       forwarded?.getChild?.("message");
     if (!direction || !message) return null;
-    return { direction, message };
+    const timestamp = forwarded ? parseDelayTimestamp(forwarded) : undefined;
+    return { direction, message, ...(timestamp !== undefined ? { timestamp } : {}) };
   }
 
   private normalizeGroupRoom(room: ChatGroupRoom): ChatGroupRoom {
@@ -3588,6 +3591,10 @@ class LulaChatClient implements ChatClient {
 
     const carbon = this.unwrapCarbonMessage(stanza);
     const messageStanza = carbon?.message ?? stanza;
+    const receivedAtMs = Date.now();
+    // XEP-0297 puts the replay delay beside the inner message. Preserve it
+    // before unwrapping so older linked-device copies retain their archive time.
+    const transportTimestamp = carbon?.timestamp ?? parseDelayTimestamp(messageStanza);
     const attrs = messageStanza.attrs ?? {};
     const groupInvitation = this.parseGroupInvitation(messageStanza);
     if (groupInvitation) {
@@ -3721,7 +3728,7 @@ class LulaChatClient implements ChatClient {
           fromDeviceId,
           toDeviceId,
           roomId,
-          timestamp: parseDelayTimestamp(messageStanza) ?? Date.now(),
+          timestamp: transportTimestamp ?? receivedAtMs,
           raw: messageStanza,
         });
       } else {
@@ -3769,7 +3776,7 @@ class LulaChatClient implements ChatClient {
           fromDeviceId,
           toDeviceId,
           roomId,
-          timestamp: parseDelayTimestamp(messageStanza) ?? Date.now(),
+          timestamp: transportTimestamp ?? receivedAtMs,
           raw: messageStanza,
         });
         this.log("debug", "chat_thread_gone_received", {
@@ -3872,6 +3879,9 @@ class LulaChatClient implements ChatClient {
       inferMessageType(decodedMetadata, body),
     );
     const emittedMessageId = attrs.id || generateMessageId();
+    const senderTimestamp = parseMetadataTimestamp(
+      metadata, Math.min(receivedAtMs, transportTimestamp ?? receivedAtMs),
+    );
     const message: ChatMessage = {
       id: emittedMessageId,
       fromUserId,
@@ -3880,10 +3890,9 @@ class LulaChatClient implements ChatClient {
       toDeviceId,
       roomId,
       body,
-      // Prefer the sender's original timestamp. Offline queues and reconnect
-      // delivery can emit stanzas in a different order, while sentAtMs stays
-      // attached to the stable message id across retries.
-      timestamp: parseMetadataTimestamp(metadata) ?? parseDelayTimestamp(messageStanza) ?? Date.now(),
+      // Preserve genuine original send times across queued/replayed delivery,
+      // but reject invalid units and times ahead of receipt/archive time.
+      timestamp: senderTimestamp ?? transportTimestamp ?? receivedAtMs,
       metadata,
       ...(attachments?.length ? { attachments } : {}),
       raw: messageStanza,
@@ -3922,6 +3931,13 @@ class LulaChatClient implements ChatClient {
         }
       },
     };
+    // An edit needs its original creation time. Substituting receipt/archive
+    // time could turn an invalid correction into an allowed one.
+    if (metadata.edited === true && senderTimestamp === undefined) {
+      this.log("warn", "chat_edit_rejected", { id: emittedMessageId, reason: "chat_edit_invalid_timestamp" });
+      await delivery.acknowledgeDelivered();
+      return;
+    }
     this.rememberMessageAuthor(roomId, emittedMessageId, originalAuthorAddress);
     await this.emitValidatedMessage(message, delivery);
     this.flushPendingRetraction(roomId, emittedMessageId, originalAuthorAddress);
@@ -6119,12 +6135,23 @@ function parseStanzaError(stanza: XmppElementLike): Pick<ChatErrorEvent, "condit
   };
 }
 
+// Millisecond epoch dates before 2000 are not plausible chat creation times;
+// this also rejects the common mistake of supplying Unix seconds as milliseconds.
+const MIN_MESSAGE_TIMESTAMP_MS = Date.UTC(2000, 0, 1);
+const MESSAGE_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+function isPlausibleMessageTimestamp(value: number, referenceTime = Date.now()): boolean {
+  return Number.isSafeInteger(value)
+    && value >= MIN_MESSAGE_TIMESTAMP_MS
+    && value <= referenceTime + MESSAGE_CLOCK_SKEW_MS;
+}
+
 function parseDelayTimestamp(stanza: XmppElementLike): number | undefined {
   const delay = stanza.getChild?.("delay", "urn:xmpp:delay");
   const stamp = delay?.attrs?.stamp;
-  if (!stamp) return undefined;
+  if (!stamp || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(stamp)) return undefined;
   const parsed = Date.parse(stamp);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  return isPlausibleMessageTimestamp(parsed) ? parsed : undefined;
 }
 
 /**
@@ -6159,13 +6186,18 @@ export function parseChatServerEvent(
   };
 }
 
-function parseMetadataTimestamp(metadata?: Record<string, unknown>): number | undefined {
+function parseMetadataTimestamp(
+  metadata?: Record<string, unknown>,
+  referenceTime = Date.now(),
+): number | undefined {
   const sentAtMs = metadata?.sentAtMs;
-  if (typeof sentAtMs === "number" && Number.isFinite(sentAtMs)) return sentAtMs;
+  if (typeof sentAtMs === "number" && isPlausibleMessageTimestamp(sentAtMs, referenceTime)) return sentAtMs;
   const createdAt = metadata?.createdAt;
-  if (typeof createdAt !== "string") return undefined;
+  // An offset is required: interpreting an unzoned string in each receiving
+  // device's local timezone would assign different instants to one message.
+  if (typeof createdAt !== "string" || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(createdAt)) return undefined;
   const parsed = Date.parse(createdAt);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  return isPlausibleMessageTimestamp(parsed, referenceTime) ? parsed : undefined;
 }
 
 function generateMessageId(): string {
