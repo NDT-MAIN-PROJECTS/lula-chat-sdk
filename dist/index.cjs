@@ -30,15 +30,35 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
+  CHAT_ATTACHMENT_CAPABILITY_EXPIRES_HEADER: () => CHAT_ATTACHMENT_CAPABILITY_EXPIRES_HEADER,
+  CHAT_ATTACHMENT_CAPABILITY_HEADER: () => CHAT_ATTACHMENT_CAPABILITY_HEADER,
+  CHAT_CONVERSATION_STATE_MESSAGE_TYPE: () => CHAT_CONVERSATION_STATE_MESSAGE_TYPE,
+  CHAT_EMERGENCY_MESSAGE_TYPE: () => CHAT_EMERGENCY_MESSAGE_TYPE,
+  CHAT_EMERGENCY_TYPE_SOS: () => CHAT_EMERGENCY_TYPE_SOS,
+  CHAT_MESSAGE_EDIT_WINDOW_MS: () => CHAT_MESSAGE_EDIT_WINDOW_MS,
+  CHAT_REACTION_EMOJIS: () => CHAT_REACTION_EMOJIS,
+  CHAT_REACTION_INTERACTION_TYPE: () => CHAT_REACTION_INTERACTION_TYPE,
+  CHAT_VOICE_MESSAGE_TYPE: () => CHAT_VOICE_MESSAGE_TYPE,
+  CHAT_VOICE_SPEC: () => CHAT_VOICE_SPEC,
+  XMPP_EMERGENCY_NS: () => XMPP_EMERGENCY_NS,
+  XMPP_MESSAGE_TIME_NS: () => XMPP_MESSAGE_TIME_NS,
+  XMPP_SERVER_EVENT_NS: () => XMPP_SERVER_EVENT_NS,
+  buildChatAttachmentDownloadRequest: () => buildChatAttachmentDownloadRequest,
+  buildChatInteractionTimeline: () => buildChatInteractionTimeline,
   buildChatMessageMetadata: () => buildChatMessageMetadata,
   buildFormSubmissionMetadata: () => buildFormSubmissionMetadata,
+  chatAttachmentDownloadCapabilityFromHeaders: () => chatAttachmentDownloadCapabilityFromHeaders,
   createChatClient: () => createChatClient,
   createDeviceId: () => createDeviceId,
+  createInMemoryOmemoDiscoveryCache: () => createInMemoryOmemoDiscoveryCache,
   createIndexDbStorageBackend: () => createIndexDbStorageBackend,
   createMemoryStorageBackend: () => createMemoryStorageBackend,
   createMongoDbStorageBackend: () => createMongoDbStorageBackend,
   createOmemoEncryption: () => createOmemoEncryption,
   createRoomDirectory: () => createRoomDirectory,
+  decryptChatAttachmentBytes: () => decryptChatAttachmentBytes,
+  downloadChatAttachmentWithFetch: () => downloadChatAttachmentWithFetch,
+  encryptChatAttachmentBytes: () => encryptChatAttachmentBytes,
   extractDisplayName: () => extractDisplayName,
   extractProviderDirectMessageRoomId: () => extractProviderDirectMessageRoomId,
   extractSubmissionId: () => extractSubmissionId,
@@ -46,10 +66,61 @@ __export(index_exports, {
   getChatAddress: () => getChatAddress,
   getChatDeviceId: () => getChatDeviceId,
   getChatUserId: () => getChatUserId,
+  getChatVoiceDurationMs: () => getChatVoiceDurationMs,
+  getChatVoiceRecorderExpoOptions: () => getChatVoiceRecorderExpoOptions,
+  getChatVoiceRecorderWebOptions: () => getChatVoiceRecorderWebOptions,
+  getMessageEditError: () => getMessageEditError,
+  getMessageInteractionId: () => getMessageInteractionId,
+  hasChatAttachmentDownloadCapability: () => hasChatAttachmentDownloadCapability,
   init: () => init,
-  storageBackends: () => storageBackends
+  isChatAudioAttachment: () => isChatAudioAttachment,
+  isChatReactionControlMessage: () => isChatReactionControlMessage,
+  isChatReactionEmoji: () => isChatReactionEmoji,
+  isEmergencyMessage: () => isEmergencyMessage,
+  isEncryptedChatAttachment: () => isEncryptedChatAttachment,
+  isMessageEditWithinWindow: () => isMessageEditWithinWindow,
+  isRetractionAuthorized: () => isRetractionAuthorized,
+  normalizeInteractionActorId: () => normalizeInteractionActorId,
+  parseChatEmergencyMessage: () => parseChatEmergencyMessage,
+  parseChatReactionEvent: () => parseChatReactionEvent,
+  parseChatReplyReference: () => parseChatReplyReference,
+  parseChatServerEvent: () => parseChatServerEvent,
+  parseConversationStateMessage: () => parseConversationStateMessage,
+  storageBackends: () => storageBackends,
+  uploadChatAttachmentWithFetch: () => uploadChatAttachmentWithFetch
 });
 module.exports = __toCommonJS(index_exports);
+
+// src/message-edit.ts
+var CHAT_MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1e3;
+function isMessageEditWithinWindow(originalTimestamp, editTimestamp = Date.now()) {
+  return Number.isFinite(originalTimestamp) && originalTimestamp > 0 && Number.isFinite(editTimestamp) && editTimestamp >= originalTimestamp && editTimestamp - originalTimestamp < CHAT_MESSAGE_EDIT_WINDOW_MS;
+}
+function authorIdentity(address) {
+  const trimmed = address.trim();
+  const normalized = trimmed.toLowerCase();
+  const bare = normalized.split("/")[0];
+  if (bare.split("@")[1]?.startsWith("conference.")) {
+    const separator = trimmed.indexOf("/");
+    return separator < 0 ? bare : `${bare}${trimmed.slice(separator)}`;
+  }
+  const [local, domain] = bare.split("@");
+  const account = local.startsWith("i.") ? local.replace(/\.d\..*$/, "") : local;
+  return domain ? `${account}@${domain}` : account;
+}
+function getMessageEditError(original, editorAddress, editTimestamp = Date.now()) {
+  if (!original) return "chat_edit_original_not_found";
+  const author = authorIdentity(original.authorAddress);
+  if (!author || author !== authorIdentity(editorAddress)) return "chat_edit_not_message_author";
+  const metadata = original.metadata ?? {};
+  if (!original.body.trim() || original.hasAttachments || metadata.deleted || metadata.redacted || metadata.retracted || metadata.formId || metadata.emergencyType || metadata.messageType !== void 0 && metadata.messageType !== "CHAT_MESSAGE") {
+    return "chat_edit_not_allowed";
+  }
+  if (!isMessageEditWithinWindow(original.timestamp, editTimestamp)) return "chat_edit_expired";
+  return void 0;
+}
+
+// src/index.ts
 var import_aes = require("@noble/ciphers/aes.js");
 var import_ed25519 = require("@noble/curves/ed25519.js");
 var import_hkdf = require("@noble/hashes/hkdf.js");
@@ -58,13 +129,539 @@ var import_utils = require("@noble/hashes/utils.js");
 var import_client = require("@xmpp/client");
 var import_non_secure = require("nanoid/non-secure");
 var import_saslmechanisms = __toESM(require("saslmechanisms"), 1);
+
+// src/omemoDiscoveryCache.ts
+var MAX_CACHE_ENTRIES = 128;
+function createInMemoryOmemoDiscoveryCache() {
+  const entries = /* @__PURE__ */ new Map();
+  const key = (owner, peer) => JSON.stringify([owner, peer]);
+  return {
+    get: (owner, peer) => entries.get(key(owner, peer))?.snapshot,
+    set(owner, peer, snapshot) {
+      const entryKey = key(owner, peer);
+      entries.delete(entryKey);
+      entries.set(entryKey, { owner, peer, snapshot });
+      if (entries.size > MAX_CACHE_ENTRIES) entries.delete(entries.keys().next().value);
+    },
+    remove: (owner, peer) => {
+      entries.delete(key(owner, peer));
+    },
+    clear(owner) {
+      if (owner === void 0) entries.clear();
+      else for (const [entryKey, entry] of entries) {
+        if (entry.owner === owner) entries.delete(entryKey);
+      }
+    },
+    peers: (owner) => Array.from(entries.values()).filter((entry) => entry.owner === owner).map((entry) => entry.peer)
+  };
+}
+function createStoredOmemoDiscoveryCache(storage, prefix, onError) {
+  const memory = createInMemoryOmemoDiscoveryCache();
+  const loads = /* @__PURE__ */ new Map();
+  const writes = /* @__PURE__ */ new Map();
+  const storageKey = (owner) => `${prefix}:discovery:${owner}`;
+  const persist = (owner) => {
+    const entries = memory.peers(owner).map((peer) => [peer, memory.get(owner, peer)]);
+    const value = JSON.stringify({ version: 1, entries });
+    const write = (writes.get(owner) ?? Promise.resolve()).then(() => storage.setItem(storageKey(owner), value)).catch(onError).finally(() => {
+      if (writes.get(owner) === write) writes.delete(owner);
+    });
+    writes.set(owner, write);
+  };
+  return {
+    ...memory,
+    load(owner) {
+      const existing = loads.get(owner);
+      if (existing) return existing;
+      const load = (async () => {
+        const raw = await storage.getItem(storageKey(owner));
+        if (!raw || raw.length > 2e6) return;
+        const parsed = JSON.parse(raw);
+        if (parsed?.version !== 1 || !Array.isArray(parsed.entries)) return;
+        for (const entry of parsed.entries.slice(-MAX_CACHE_ENTRIES)) {
+          if (!Array.isArray(entry) || entry.length !== 2) continue;
+          const [peer, snapshot] = entry;
+          if (typeof peer !== "string" || peer.length > 1024 || !peer.includes("@")) continue;
+          if (!snapshot || !Number.isFinite(snapshot.fetchedAt) || !Array.isArray(snapshot.devices)) continue;
+          if (!snapshot.devices.length || snapshot.devices.length > 128) continue;
+          if (!snapshot.devices.every((device) => device && Number.isSafeInteger(device.deviceId) && device.deviceId > 0 && typeof device.identityKey === "string" && /^[A-Za-z0-9+/]{43}=$/.test(device.identityKey))) continue;
+          memory.set(owner, peer, snapshot);
+        }
+      })().catch(onError);
+      loads.set(owner, load);
+      return load;
+    },
+    set(owner, peer, snapshot) {
+      memory.set(owner, peer, snapshot);
+      persist(owner);
+    },
+    remove(owner, peer) {
+      memory.remove(owner, peer);
+      persist(owner);
+    },
+    clear(owner) {
+      const owners = owner === void 0 ? Array.from(loads.keys()) : [owner];
+      memory.clear(owner);
+      for (const account of owners) persist(account);
+    }
+  };
+}
+function createOmemoDiscoveryReader(store, options) {
+  const flights = /* @__PURE__ */ new Map();
+  const versions = /* @__PURE__ */ new Map();
+  const verified = /* @__PURE__ */ new Set();
+  let epoch = 0;
+  const key = (owner, peer) => JSON.stringify([owner, peer]);
+  const refresh = (owner, peer, fetch) => {
+    const entryKey = key(owner, peer);
+    const existing = flights.get(entryKey);
+    if (existing) return existing;
+    const startedEpoch = epoch;
+    const flight = (async () => {
+      await store.load?.(owner);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (startedEpoch !== epoch) throw new Error("xmpp_omemo_cache_reset");
+        const version = versions.get(entryKey) ?? 0;
+        const snapshot = await fetch();
+        if (startedEpoch !== epoch) throw new Error("xmpp_omemo_cache_reset");
+        if (version !== (versions.get(entryKey) ?? 0)) continue;
+        store.set(owner, peer, snapshot);
+        verified.add(entryKey);
+        versions.delete(entryKey);
+        return snapshot;
+      }
+      throw new Error("xmpp_omemo_devices_changed_during_discovery");
+    })().finally(() => {
+      if (flights.get(entryKey) === flight) {
+        flights.delete(entryKey);
+        versions.delete(entryKey);
+      }
+    });
+    flights.set(entryKey, flight);
+    return flight;
+  };
+  return {
+    refresh,
+    async get(owner, peer, fetch, onRefreshError) {
+      await store.load?.(owner);
+      const snapshot = store.get(owner, peer);
+      const age = snapshot ? Date.now() - snapshot.fetchedAt : Infinity;
+      if (snapshot && verified.has(key(owner, peer)) && age >= 0 && age < options.maxAgeMs) {
+        if (age >= options.refreshAfterMs) void refresh(owner, peer, fetch).catch(onRefreshError);
+        return snapshot;
+      }
+      return refresh(owner, peer, fetch);
+    },
+    invalidate(owner, peer) {
+      const entryKey = key(owner, peer);
+      const cached = Boolean(store.get(owner, peer));
+      verified.delete(entryKey);
+      if (!cached && !flights.has(entryKey)) return false;
+      if (cached) store.remove(owner, peer);
+      if (flights.has(entryKey)) versions.set(entryKey, (versions.get(entryKey) ?? 0) + 1);
+      return true;
+    },
+    reset() {
+      epoch += 1;
+      flights.clear();
+      versions.clear();
+      verified.clear();
+    }
+  };
+}
+
+// src/index.ts
+var CHAT_CONVERSATION_STATE_MESSAGE_TYPE = "CONVERSATION_STATE";
+var CHAT_EMERGENCY_MESSAGE_TYPE = "EMERGENCY";
+var CHAT_EMERGENCY_TYPE_SOS = "sos";
+var CHAT_VOICE_MESSAGE_TYPE = "VOICE_MESSAGE";
+var CHAT_REACTION_INTERACTION_TYPE = "CHAT_REACTION";
+var CHAT_REACTION_EMOJIS = ["\u{1F44D}", "\u2764\uFE0F", "\u{1F602}", "\u{1F62E}", "\u{1F622}", "\u{1F64F}"];
+var CHAT_REACTION_MAX_CODE_POINTS = 16;
+var CHAT_REACTION_EMOJI_PATTERN = /[\u2600-\u27BF\u{1F1E6}-\u{1FAFF}]/u;
+var CHAT_REACTION_EMOJI_SEQUENCE_PATTERN = /^[\u200D\uFE0F\u2600-\u27BF\u{1F1E6}-\u{1FAFF}]+$/u;
+function isRetractionAuthorized(event, originalAuthorAddress) {
+  const retractionAuthor = normalizeBareDeviceId(
+    event.fromFullAddress || event.fromDeviceId
+  ).toLowerCase();
+  const originalAuthor = normalizeBareDeviceId(originalAuthorAddress).toLowerCase();
+  return Boolean(retractionAuthor && originalAuthor && retractionAuthor === originalAuthor);
+}
+var CHAT_ATTACHMENT_CAPABILITY_HEADER = "x-lula-attachment-capability";
+var CHAT_ATTACHMENT_CAPABILITY_EXPIRES_HEADER = "x-lula-attachment-capability-expires";
+var CHAT_ATTACHMENT_ENCRYPTION_AAD = (0, import_utils.utf8ToBytes)("urn:lula:defy:attachment:1");
+function encryptChatAttachmentBytes(input) {
+  const plaintext = input instanceof Uint8Array ? new Uint8Array(input) : new Uint8Array(input);
+  const key = (0, import_utils.randomBytes)(32);
+  const iv = (0, import_utils.randomBytes)(12);
+  const ciphertext = (0, import_aes.gcm)(key, iv, CHAT_ATTACHMENT_ENCRYPTION_AAD).encrypt(plaintext);
+  return {
+    ciphertext,
+    encryption: {
+      v: 1,
+      alg: "A256GCM",
+      keyB64: bytesToBase64(key),
+      ivB64: bytesToBase64(iv),
+      plaintextSha256B64: bytesToBase64((0, import_sha2.sha256)(plaintext)),
+      ciphertextSha256B64: bytesToBase64((0, import_sha2.sha256)(ciphertext)),
+      plaintextSize: plaintext.length,
+      ciphertextSize: ciphertext.length
+    }
+  };
+}
+function decryptChatAttachmentBytes(input, encryption) {
+  const ciphertext = input instanceof Uint8Array ? new Uint8Array(input) : new Uint8Array(input);
+  const normalized = normalizeAttachmentEncryption(encryption);
+  if (!normalized) throw new Error("chat_attachment_encryption_invalid");
+  if (ciphertext.length !== normalized.ciphertextSize) {
+    throw new Error("chat_attachment_ciphertext_size_mismatch");
+  }
+  if (bytesToBase64((0, import_sha2.sha256)(ciphertext)) !== normalized.ciphertextSha256B64) {
+    throw new Error("chat_attachment_ciphertext_hash_mismatch");
+  }
+  let plaintext;
+  try {
+    plaintext = (0, import_aes.gcm)(
+      base64ToBytes(normalized.keyB64),
+      base64ToBytes(normalized.ivB64),
+      CHAT_ATTACHMENT_ENCRYPTION_AAD
+    ).decrypt(ciphertext);
+  } catch {
+    throw new Error("chat_attachment_decryption_failed");
+  }
+  if (plaintext.length !== normalized.plaintextSize) {
+    throw new Error("chat_attachment_plaintext_size_mismatch");
+  }
+  if (bytesToBase64((0, import_sha2.sha256)(plaintext)) !== normalized.plaintextSha256B64) {
+    throw new Error("chat_attachment_plaintext_hash_mismatch");
+  }
+  return plaintext;
+}
+function isEncryptedChatAttachment(attachment) {
+  return Boolean(normalizeAttachmentEncryption(attachment.encryption));
+}
+function hasChatAttachmentDownloadCapability(attachment) {
+  return Boolean(
+    normalizeAttachmentDownloadCapability(attachment.downloadCapability)
+  );
+}
+function readAttachmentResponseHeader(headers, name) {
+  if (typeof headers.get === "function") {
+    return headers.get(name)?.trim() || void 0;
+  }
+  const expected = name.toLowerCase();
+  for (const [headerName, rawValue] of Object.entries(headers)) {
+    if (headerName.toLowerCase() !== expected) continue;
+    const value = Array.isArray(rawValue) ? rawValue[0] : rawValue;
+    return value?.trim() || void 0;
+  }
+  return void 0;
+}
+function chatAttachmentDownloadCapabilityFromHeaders(headers) {
+  const authorization = readAttachmentResponseHeader(
+    headers,
+    CHAT_ATTACHMENT_CAPABILITY_HEADER
+  );
+  const expiresRaw = readAttachmentResponseHeader(
+    headers,
+    CHAT_ATTACHMENT_CAPABILITY_EXPIRES_HEADER
+  );
+  const expiresEpochSeconds = Number.parseInt(expiresRaw ?? "", 10);
+  if (!authorization || !/^LulaAttachment\s+v1\.[A-Za-z0-9._-]+$/.test(authorization) || !Number.isSafeInteger(expiresEpochSeconds) || expiresEpochSeconds <= 0) {
+    throw new Error("chat_attachment_download_capability_invalid");
+  }
+  return {
+    v: 1,
+    scheme: "LulaAttachment",
+    authorization,
+    expiresAt: new Date(expiresEpochSeconds * 1e3).toISOString()
+  };
+}
+function buildChatAttachmentDownloadRequest(attachment) {
+  const url = firstString(attachment.url, attachment.id);
+  if (!url || !/^https?:\/\//i.test(url)) {
+    throw new Error("chat_attachment_download_locator_invalid");
+  }
+  const capability = normalizeAttachmentDownloadCapability(
+    attachment.downloadCapability
+  );
+  if (!capability) {
+    throw new Error("chat_attachment_download_capability_required");
+  }
+  if (Date.parse(capability.expiresAt) <= Date.now()) {
+    throw new Error("chat_attachment_download_capability_expired");
+  }
+  return {
+    url,
+    headers: { Authorization: capability.authorization }
+  };
+}
+function requiredAttachmentFetch(fetchOverride) {
+  const fetchImpl = fetchOverride ?? globalThis.fetch;
+  if (typeof fetchImpl !== "function") {
+    throw new Error("chat_attachment_fetch_unavailable");
+  }
+  return fetchImpl.bind(globalThis);
+}
+function stableChatAttachmentLocator(sourceUrl) {
+  try {
+    const parsed = new URL(sourceUrl);
+    for (const key of [
+      "v",
+      "v2",
+      "token",
+      "size",
+      "content_type",
+      "expires",
+      "slot",
+      "username"
+    ]) {
+      parsed.searchParams.delete(key);
+    }
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return sourceUrl;
+  }
+}
+async function uploadChatAttachmentWithFetch(input, context, options = {}) {
+  const bytes = input.data ?? await options.loadBytes?.(input);
+  if (!(bytes instanceof ArrayBuffer) && !(bytes instanceof Uint8Array)) {
+    throw new Error("chat_attachment_bytes_required");
+  }
+  const name = firstString(input.name) ?? `attachment-${Date.now()}.bin`;
+  const mimeType = firstString(input.mimeType) ?? "application/octet-stream";
+  const encrypted = encryptChatAttachmentBytes(bytes);
+  const encryptedName = `${name.replace(/[^\w.-]/g, "_").slice(-96) || "attachment"}.lulaenc`;
+  const slot = await context.requestSlot({
+    name: encryptedName,
+    mimeType: "application/octet-stream",
+    size: encrypted.encryption.ciphertextSize
+  });
+  const response = await requiredAttachmentFetch(options.fetch)(slot.putUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      ...slot.headers
+    },
+    body: encrypted.ciphertext
+  });
+  if (!response.ok) {
+    throw new Error(`chat_attachment_upload_failed:${response.status}`);
+  }
+  const downloadCapability = chatAttachmentDownloadCapabilityFromHeaders(
+    response.headers
+  );
+  const stableLocator = stableChatAttachmentLocator(slot.getUrl.trim());
+  if (!/^https?:\/\//i.test(stableLocator)) {
+    throw new Error("chat_attachment_download_locator_invalid");
+  }
+  return normalizeRequiredAttachment({
+    id: stableLocator,
+    type: mimeType.startsWith("image/") ? "image" : "file",
+    name,
+    mimeType,
+    size: encrypted.encryption.plaintextSize,
+    url: stableLocator,
+    metadata: input.metadata,
+    encryption: encrypted.encryption,
+    downloadCapability
+  });
+}
+async function downloadChatAttachmentWithFetch(attachment, options = {}) {
+  const request = buildChatAttachmentDownloadRequest(attachment);
+  const response = await requiredAttachmentFetch(options.fetch)(request.url, {
+    method: "GET",
+    headers: request.headers
+  });
+  if (!response.ok) {
+    throw new Error(`chat_attachment_download_failed:${response.status}`);
+  }
+  const downloaded = new Uint8Array(await response.arrayBuffer());
+  return attachment.encryption ? decryptChatAttachmentBytes(downloaded, attachment.encryption) : downloaded;
+}
+var CHAT_VOICE_SPEC = {
+  /** AAC-LC in MP4, the container every platform can play. */
+  mimeType: "audio/mp4",
+  /** The same container with the codec spelled out, as `MediaRecorder` wants it. */
+  codecMimeType: "audio/mp4;codecs=mp4a.40.2",
+  extension: "m4a",
+  sampleRate: 44100,
+  channels: 1,
+  bitsPerSecond: 128e3,
+  /** Shorter than this is a mis-click, not a message. */
+  minDurationMs: 700
+};
+function getChatVoiceRecorderWebOptions() {
+  return {
+    constraints: { audio: { channelCount: CHAT_VOICE_SPEC.channels } },
+    recorder: {
+      mimeType: CHAT_VOICE_SPEC.codecMimeType,
+      audioBitsPerSecond: CHAT_VOICE_SPEC.bitsPerSecond
+    }
+  };
+}
+function getChatVoiceRecorderExpoOptions() {
+  return {
+    extension: `.${CHAT_VOICE_SPEC.extension}`,
+    sampleRate: CHAT_VOICE_SPEC.sampleRate,
+    numberOfChannels: CHAT_VOICE_SPEC.channels,
+    bitRate: CHAT_VOICE_SPEC.bitsPerSecond,
+    android: { outputFormat: "mpeg4", audioEncoder: "aac" },
+    ios: {
+      // `IOSOutputFormat.MPEG4AAC` — a FourCC, trailing space included.
+      outputFormat: "aac ",
+      // `AudioQuality.MAX`.
+      audioQuality: 127,
+      linearPCMBitDepth: 16,
+      linearPCMIsBigEndian: false,
+      linearPCMIsFloat: false
+    }
+  };
+}
+var CHAT_AUDIO_EXTENSION_PATTERN = /\.(aac|caf|m4a|mp3|ogg|opus|wav|webm)$/i;
+function isChatAudioAttachment(attachment) {
+  if (attachment.mimeType?.trim().toLowerCase().startsWith("audio/")) {
+    return true;
+  }
+  return CHAT_AUDIO_EXTENSION_PATTERN.test(String(attachment.name ?? ""));
+}
+function getChatVoiceDurationMs(metadata) {
+  if (!metadata) {
+    return void 0;
+  }
+  if (metadata.voiceMessage !== true && metadata.messageType !== CHAT_VOICE_MESSAGE_TYPE) {
+    return void 0;
+  }
+  const value = metadata.voiceDurationMs;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : void 0;
+}
+function normalizeVoiceMimeType(value) {
+  return (value ?? "").split(";")[0].trim().toLowerCase();
+}
+function normalizeVoiceAttachmentName(name) {
+  const suffix = `.${CHAT_VOICE_SPEC.extension}`;
+  const trimmed = name?.trim();
+  if (trimmed && trimmed.toLowerCase().endsWith(suffix)) {
+    return trimmed;
+  }
+  const base = trimmed?.replace(/\.[^./\\]+$/, "").trim();
+  return `${base || `voice-${Date.now()}`}${suffix}`;
+}
+function normalizeInteractionActorId(value) {
+  const normalized = (String(value ?? "").trim().split("/")[0] ?? "").toLowerCase();
+  if (!normalized) return "";
+  const localpart = normalized.split("@")[0] ?? normalized;
+  const appUserMatch = /^i\.([^.]+)(?:\.d\..+)?$/.exec(localpart);
+  return appUserMatch?.[1] ?? normalized;
+}
+function isChatReactionEmoji(value) {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim();
+  return normalized.length > 0 && !/\s/u.test(normalized) && Array.from(normalized).length <= CHAT_REACTION_MAX_CODE_POINTS && CHAT_REACTION_EMOJI_PATTERN.test(normalized) && CHAT_REACTION_EMOJI_SEQUENCE_PATTERN.test(normalized);
+}
+function getMessageInteractionId(message) {
+  return firstString(message.metadata?.canonicalEventId, message.id) ?? "";
+}
+function parseChatReplyReference(metadata) {
+  if (!metadata || !isRecord(metadata.replyTo)) return void 0;
+  const messageId = firstString(metadata.replyTo.messageId);
+  const body = firstString(metadata.replyTo.body);
+  if (!messageId || !body) return void 0;
+  const senderId = firstString(metadata.replyTo.senderId);
+  const senderDisplayName = firstString(metadata.replyTo.senderDisplayName);
+  return {
+    messageId,
+    body,
+    ...senderId ? { senderId } : {},
+    ...senderDisplayName ? { senderDisplayName } : {}
+  };
+}
+function parseChatReactionEvent(message) {
+  const metadata = message.metadata;
+  if (!metadata || metadata.chatInteractionType !== CHAT_REACTION_INTERACTION_TYPE) {
+    return void 0;
+  }
+  const targetMessageId = firstString(metadata.reactionToId);
+  const emoji = typeof metadata.reactionEmoji === "string" ? metadata.reactionEmoji.trim() : metadata.reactionEmoji;
+  const actorId = normalizeInteractionActorId(
+    firstString(metadata.reactionActorId, message.senderId, message.fromUserId)
+  );
+  if (!targetMessageId || !isChatReactionEmoji(emoji) || !actorId) return void 0;
+  return {
+    targetMessageId,
+    emoji,
+    actorId,
+    removed: metadata.reactionRemoved === true
+  };
+}
+function isChatReactionControlMessage(message) {
+  return Boolean(parseChatReactionEvent(message));
+}
+function buildChatInteractionTimeline(messages, currentActorId) {
+  const reactionActorsByMessage = /* @__PURE__ */ new Map();
+  messages.forEach((message) => {
+    const event = parseChatReactionEvent(message);
+    if (!event) return;
+    const reactions = reactionActorsByMessage.get(event.targetMessageId) ?? /* @__PURE__ */ new Map();
+    const actors = reactions.get(event.emoji) ?? /* @__PURE__ */ new Set();
+    if (event.removed) actors.delete(event.actorId);
+    else actors.add(event.actorId);
+    reactions.set(event.emoji, actors);
+    reactionActorsByMessage.set(event.targetMessageId, reactions);
+  });
+  const normalizedCurrentActorId = normalizeInteractionActorId(currentActorId);
+  const timeline = [];
+  messages.forEach((message) => {
+    if (isChatReactionControlMessage(message)) return;
+    const interactionId = getMessageInteractionId(message);
+    const reactionActors = reactionActorsByMessage.get(interactionId);
+    const reactions = [];
+    const quickEmojis = CHAT_REACTION_EMOJIS;
+    const orderedEmojis = [
+      ...CHAT_REACTION_EMOJIS.filter((emoji) => reactionActors?.has(emoji)),
+      ...Array.from(reactionActors?.keys() ?? []).filter(
+        (emoji) => !quickEmojis.includes(emoji)
+      )
+    ];
+    orderedEmojis.forEach((emoji) => {
+      const actorIds = Array.from(reactionActors?.get(emoji) ?? []);
+      if (actorIds.length === 0) return;
+      reactions.push({
+        emoji,
+        count: actorIds.length,
+        actorIds,
+        reactedByCurrentUser: Boolean(normalizedCurrentActorId) && actorIds.includes(normalizedCurrentActorId)
+      });
+    });
+    const replyTo = parseChatReplyReference(message.metadata);
+    timeline.push({
+      ...message,
+      interactionId,
+      reactions,
+      ...replyTo ? { replyTo } : {}
+    });
+  });
+  return timeline;
+}
 var XMPP_CHAT_NS = "urn:lula:defy:chat:1";
+var XMPP_MESSAGE_TIME_NS = "urn:lulafi:message-time:1";
 var XMPP_RECEIPTS_NS = "urn:xmpp:receipts";
 var XMPP_CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0";
 var XMPP_CHATSTATES_NS = "http://jabber.org/protocol/chatstates";
 var XMPP_HTTP_UPLOAD_NS = "urn:xmpp:http:upload:0";
 var XMPP_CARBONS_NS = "urn:xmpp:carbons:2";
 var XMPP_FORWARD_NS = "urn:xmpp:forward:0";
+var XMPP_FALLBACK_NS = "urn:xmpp:fallback:0";
+var XMPP_HINTS_NS = "urn:xmpp:hints";
+var XMPP_RETRACT_NS = "urn:xmpp:message-retract:1";
+var XMPP_STREAM_MANAGEMENT_NS = "urn:xmpp:sm:3";
+var XMPP_STABLE_ID_NS = "urn:xmpp:sid:0";
+var XMPP_MUC_NS = "http://jabber.org/protocol/muc";
+var XMPP_MUC_USER_NS = "http://jabber.org/protocol/muc#user";
+var XMPP_DIRECT_MUC_INVITE_NS = "jabber:x:conference";
+var XMPP_EMERGENCY_NS = "urn:lulafi:emergency:1";
+var XMPP_SERVER_EVENT_NS = "urn:lulafi:server-event:1";
 var OMEMO_NS = "eu.siacs.conversations.axolotl";
 var OMEMO_DEVICELIST_NODE = "eu.siacs.conversations.axolotl.devicelist";
 var OMEMO_BUNDLE_NODE_PREFIX = "eu.siacs.conversations.axolotl.bundles:";
@@ -77,12 +674,18 @@ var PUBSUB_NS = "http://jabber.org/protocol/pubsub";
 var XDATA_NS = "jabber:x:data";
 var DEFAULT_CONNECT_TIMEOUT_MS = 15e3;
 var DEFAULT_IQ_TIMEOUT_MS = 15e3;
-var OMEMO_IQ_TIMEOUT_MS = 5e3;
+var DEFAULT_MUC_JOIN_TIMEOUT_MS = 15e3;
+var MUC_JOIN_RETRY_DELAYS_MS = [500, 1e3, 2e3, 4e3, 8e3, 16e3];
+var OMEMO_IQ_TIMEOUT_MS = 1e4;
 var OMEMO_IQ_MAX_ATTEMPTS = 3;
 var OMEMO_IQ_RETRY_DELAY_MS = 250;
 var DEFAULT_TYPING_AUTO_PAUSE_MS = 1e4;
 var DEFAULT_OMEMO_STATE_KEY_PREFIX = "chat_sdk_omemo_state";
 var DEFAULT_XMPP_WEBSOCKET_PATH = "/chat/websocket";
+var MAX_RUNTIME_MESSAGE_AUTHORS_PER_ROOM = 500;
+var MAX_RUNTIME_MESSAGE_AUTHOR_ROOMS = 100;
+var MAX_PENDING_RETRACTIONS_PER_ROOM = 200;
+var MAX_PENDING_RETRACTION_ROOMS = 100;
 var CHAT_LOG_LEVEL_WEIGHT = {
   silent: 0,
   error: 1,
@@ -187,7 +790,7 @@ function createRoomDirectory(options) {
       if (cachedDeviceIds.length) return cachedDeviceIds;
       if (!options.getRoom) return [];
       const room = normalizeChatRoomResponse(await options.getRoom(normalizedRoomId), options);
-      return deriveFanoutDeviceIds(room);
+      return deriveRoomDeviceIds(room);
     },
     getOrCreateRoom: options.getOrCreateRoom ? async (input) => {
       const room = normalizeChatRoomResponse(await options.getOrCreateRoom(input), options);
@@ -198,16 +801,37 @@ function createRoomDirectory(options) {
 var LulaChatClient = class {
   config;
   messageListeners = /* @__PURE__ */ new Set();
+  groupInvitationListeners = /* @__PURE__ */ new Set();
   typingListeners = /* @__PURE__ */ new Set();
+  threadGoneListeners = /* @__PURE__ */ new Set();
+  serverEventListeners = /* @__PURE__ */ new Set();
+  retractionListeners = /* @__PURE__ */ new Set();
   deliveryListeners = /* @__PURE__ */ new Set();
+  serverAcknowledgementListeners = /* @__PURE__ */ new Set();
+  serverSendFailureListeners = /* @__PURE__ */ new Set();
+  streamManagementListeners = /* @__PURE__ */ new Set();
   errorListeners = /* @__PURE__ */ new Set();
   statusListeners = /* @__PURE__ */ new Set();
   xmpp = null;
   status = "idle";
   connectPromise = null;
+  onlineReadinessPromise = null;
   pendingIqMap = /* @__PURE__ */ new Map();
+  groupRooms = /* @__PURE__ */ new Map();
+  groupRoomIdsByMucJid = /* @__PURE__ */ new Map();
+  joinedGroupRooms = /* @__PURE__ */ new Set();
+  mucOccupantRealJids = /* @__PURE__ */ new Map();
+  pendingGroupJoins = /* @__PURE__ */ new Map();
+  groupJoinRetryTimers = /* @__PURE__ */ new Map();
+  groupJoinRetryAttempts = /* @__PURE__ */ new Map();
+  serverAckWaiters = /* @__PURE__ */ new Map();
+  serverMessageTimestamps = /* @__PURE__ */ new Map();
   onlineDeviceId;
   roomPeers = /* @__PURE__ */ new Map();
+  editTargets = /* @__PURE__ */ new Map();
+  pendingEdits = /* @__PURE__ */ new Map();
+  messageAuthorsByRoom = /* @__PURE__ */ new Map();
+  pendingRetractionsByRoom = /* @__PURE__ */ new Map();
   typingAutoPauseTimers = /* @__PURE__ */ new Map();
   constructor(config) {
     this.config = normalizeConfig(config);
@@ -229,6 +853,7 @@ var LulaChatClient = class {
   }
   async stop() {
     this.log("info", "chat_stop_requested", { status: this.status });
+    this.config.encryption?.onDisconnect?.(this.getEncryptionContext());
     this.setStatus("stopping");
     for (const timer of this.typingAutoPauseTimers.values()) {
       clearTimeout(timer);
@@ -237,11 +862,60 @@ var LulaChatClient = class {
     const current = this.xmpp;
     this.xmpp = null;
     this.onlineDeviceId = void 0;
+    this.onlineReadinessPromise = null;
+    this.joinedGroupRooms.clear();
+    this.mucOccupantRealJids.clear();
+    this.clearAllGroupJoinRetries();
+    this.rejectPendingGroupJoins(new Error("chat_client_stopped"));
+    this.rejectPendingIq(new Error("chat_client_stopped"));
+    this.rejectServerAckWaiters(new Error("chat_client_stopped"));
     if (current) {
+      current.reconnect.stop();
       await current.stop();
     }
     this.setStatus("offline");
     this.log("info", "chat_stopped");
+  }
+  async joinGroupRoom(room) {
+    const normalized = this.normalizeGroupRoom(room);
+    this.rememberGroupRoom(normalized);
+    try {
+      await this.connect();
+      await this.ensureGroupRoomJoined(normalized.roomId);
+    } catch (error) {
+      this.scheduleGroupJoinRetry(normalized.roomId);
+      throw error;
+    }
+  }
+  async updateGroupRoom(room) {
+    const normalized = this.normalizeGroupRoom(room);
+    this.rememberGroupRoom(normalized);
+    if (this.status === "online") {
+      try {
+        await this.ensureGroupRoomJoined(normalized.roomId);
+      } catch (error) {
+        this.scheduleGroupJoinRetry(normalized.roomId);
+        throw error;
+      }
+    }
+  }
+  async leaveGroupRoom(roomId) {
+    const normalizedRoomId = roomId.trim();
+    if (!normalizedRoomId) throw new Error("chat_room_id_required");
+    const room = this.groupRooms.get(normalizedRoomId);
+    if (!room) return;
+    if (this.xmpp && this.joinedGroupRooms.has(normalizedRoomId)) {
+      await this.xmpp.send(
+        (0, import_client.xml)("presence", {
+          to: `${room.mucJid}/${this.getGroupNickname(room)}`,
+          type: "unavailable"
+        })
+      );
+    }
+    this.joinedGroupRooms.delete(normalizedRoomId);
+    this.clearGroupJoinRetry(normalizedRoomId);
+    this.groupRooms.delete(normalizedRoomId);
+    this.groupRoomIdsByMucJid.delete(normalizeBareDeviceId(room.mucJid));
   }
   async getPeerDeviceIds(roomId) {
     const deviceIds = await this.resolveRoomDeviceIds(roomId);
@@ -276,6 +950,144 @@ var LulaChatClient = class {
       "user"
     );
   }
+  async editMessage(input) {
+    if (!input.roomId.trim() || !input.targetMessageId.trim())
+      throw new Error("chat_edit_original_not_found");
+    if (input.attachments?.length) throw new Error("chat_edit_not_allowed");
+    if (input.serverAcceptedAt !== void 0 && (!input.id || !Number.isFinite(input.serverAcceptedAt) || input.serverAcceptedAt <= 0)) {
+      throw new Error("chat_edit_acceptance_invalid");
+    }
+    return this.sendMessageInput(
+      {
+        ...input,
+        metadata: buildChatMessageMetadata({
+          ...input,
+          displayName: this.config.displayName,
+          metadata: { ...input.metadata, edited: true, replacesId: input.targetMessageId }
+        })
+      },
+      "user",
+      input.serverAcceptedAt
+    );
+  }
+  async sendEmergency(input) {
+    const alertId = input.alertId.trim();
+    if (!alertId) throw new Error("chat_emergency_alert_id_required");
+    const emergencyType = input.emergencyType ?? CHAT_EMERGENCY_TYPE_SOS;
+    if (emergencyType !== CHAT_EMERGENCY_TYPE_SOS) {
+      throw new Error("chat_emergency_type_invalid");
+    }
+    const triggeredAt = normalizeIsoDate(input.triggeredAt) ?? (/* @__PURE__ */ new Date()).toISOString();
+    const metadata = buildChatMessageMetadata({
+      ...input,
+      metadata: {
+        ...input.metadata ?? {},
+        messageType: CHAT_EMERGENCY_MESSAGE_TYPE,
+        emergencyType,
+        emergencyAlertId: alertId,
+        emergencyTriggeredAt: triggeredAt
+      },
+      displayName: this.config.displayName
+    });
+    const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
+    return this.sendMessageInput(
+      {
+        ...input,
+        metadata,
+        targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? input.roomId
+      },
+      "user"
+    );
+  }
+  sendReply(input) {
+    const { replyTo, metadata, ...message } = input;
+    return this.sendChatMessage({
+      ...message,
+      metadata: { ...metadata ?? {}, replyTo }
+    });
+  }
+  addReaction(input) {
+    return this.sendReaction(input, false);
+  }
+  removeReaction(input) {
+    return this.sendReaction(input, true);
+  }
+  async retractMessage(input) {
+    const targetMessageId = input.messageId.trim();
+    if (!targetMessageId) throw new Error("chat_retraction_target_required");
+    const roomId = input.roomId?.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+    await this.connect();
+    const id = input.id || `retract-${generateMessageId()}`;
+    const targetRoomId = input.targetRoomId?.trim() || roomId;
+    const targetScope = input.targetScope ?? "user";
+    const groupRoom = this.getGroupRoomForTransport(targetRoomId) ?? this.getGroupRoomForTransport(roomId);
+    if (groupRoom) {
+      await this.ensureGroupRoomJoined(groupRoom.roomId);
+    }
+    const targetDeviceIds = groupRoom ? [groupRoom.mucJid] : await this.resolveRoomTargets({
+      roomId: targetRoomId,
+      explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope
+    });
+    const fallbackBody = "/me retracted a previous message.";
+    const metadata = normalizeMessageMetadata(void 0, "CHAT_MESSAGE");
+    await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
+      const encodedPayload = await this.encodePayload({
+        toDeviceId,
+        ...groupRoom ? { recipientJids: this.getGroupEncryptionRecipientJids(groupRoom) } : {},
+        body: fallbackBody,
+        metadata
+      });
+      const children = [
+        (0, import_client.xml)("body", {}, encodedPayload.body ?? fallbackBody),
+        ...encodedPayload.children,
+        (0, import_client.xml)("thread", {}, roomId),
+        (0, import_client.xml)("retract", { xmlns: XMPP_RETRACT_NS, id: targetMessageId }),
+        (0, import_client.xml)("fallback", { xmlns: XMPP_FALLBACK_NS, for: XMPP_RETRACT_NS }),
+        (0, import_client.xml)("store", { xmlns: XMPP_HINTS_NS })
+      ];
+      await this.requireXmpp().send(
+        (0, import_client.xml)(
+          "message",
+          { to: toDeviceId, type: groupRoom ? "groupchat" : "chat", id },
+          ...children
+        )
+      );
+    });
+    this.rememberRoomPeers(roomId, targetDeviceIds);
+    if (targetRoomId !== roomId) {
+      this.rememberRoomPeers(targetRoomId, targetDeviceIds);
+    }
+    this.log("info", "chat_message_retraction_sent", {
+      id,
+      targetMessageId,
+      roomId,
+      targetCount: targetDeviceIds.length
+    });
+    return id;
+  }
+  sendReaction(input, removed) {
+    const { targetMessageId, emoji, actorId, metadata, ...message } = input;
+    const normalizedTargetMessageId = targetMessageId.trim();
+    const normalizedEmoji = emoji.trim();
+    if (!normalizedTargetMessageId) throw new Error("chat_reaction_target_required");
+    if (!isChatReactionEmoji(normalizedEmoji)) throw new Error("chat_reaction_emoji_invalid");
+    const normalizedActorId = normalizeInteractionActorId(actorId ?? this.config.userId);
+    if (!normalizedActorId) throw new Error("chat_reaction_actor_required");
+    return this.sendChatMessage({
+      ...message,
+      body: normalizedEmoji,
+      metadata: {
+        ...metadata ?? {},
+        chatInteractionType: CHAT_REACTION_INTERACTION_TYPE,
+        reactionToId: normalizedTargetMessageId,
+        reactionEmoji: normalizedEmoji,
+        reactionRemoved: removed,
+        reactionActorId: normalizedActorId
+      }
+    });
+  }
   async sendFormSubmission(input) {
     const metadata = buildFormSubmissionMetadata({
       ...input,
@@ -292,66 +1104,217 @@ var LulaChatClient = class {
       "user"
     );
   }
+  async sendConversationState(input) {
+    const roomId = input.roomId.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+    if (input.conversationType !== "form_submission") {
+      throw new Error("chat_conversation_type_invalid");
+    }
+    if (input.state !== "open" && input.state !== "closed") {
+      throw new Error("chat_conversation_state_invalid");
+    }
+    const changedAt = normalizeIsoDate(input.changedAt) ?? (/* @__PURE__ */ new Date()).toISOString();
+    const metadata = normalizeMessageMetadata(
+      {
+        ...input.metadata ?? {},
+        conversationType: input.conversationType,
+        conversationState: input.state,
+        conversationId: trimToUndefined(input.conversationId),
+        conversationChangedAt: changedAt
+      },
+      CHAT_CONVERSATION_STATE_MESSAGE_TYPE
+    );
+    const legacyId = await this.sendMessageInput(
+      {
+        toDeviceId: input.toDeviceId,
+        toDeviceIds: input.toDeviceIds,
+        peerDeviceId: input.peerDeviceId,
+        peerDeviceIds: input.peerDeviceIds,
+        roomId,
+        targetRoomId: input.targetRoomId,
+        targetScope: input.targetScope,
+        id: input.id,
+        requestReceipt: input.requestReceipt,
+        body: input.state === "closed" ? "Conversation closed" : "Conversation reopened",
+        metadata
+      },
+      "user"
+    );
+    if (input.state === "closed") {
+      try {
+        await this.sendThreadGone({
+          toDeviceId: input.toDeviceId,
+          toDeviceIds: input.toDeviceIds,
+          peerDeviceId: input.peerDeviceId,
+          peerDeviceIds: input.peerDeviceIds,
+          roomId,
+          targetRoomId: input.targetRoomId,
+          targetScope: input.targetScope,
+          id: input.id ? `${input.id}-gone` : void 0
+        });
+      } catch (error) {
+        this.log("warn", "chat_thread_gone_compat_send_failed", {
+          roomId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return legacyId;
+  }
   async uploadAttachment(inputOrRoomId, attachment) {
     const input = typeof inputOrRoomId === "string" ? { roomId: inputOrRoomId, attachment } : inputOrRoomId;
     const roomId = input.roomId.trim();
     if (!roomId) throw new Error("chat_room_id_required");
     if (!input.attachment) throw new Error("chat_attachment_required");
-    if (!this.config.attachmentService?.upload) {
-      throw new Error("chat_attachment_service_required");
-    }
     await this.connect();
-    const uploaded = await this.config.attachmentService.upload(
-      input.attachment,
-      this.getAttachmentUploadContext(roomId)
-    );
-    return normalizeRequiredAttachment(uploaded);
+    const context = this.getAttachmentUploadContext(roomId);
+    const uploaded = this.config.attachmentService?.upload ? await this.config.attachmentService.upload(input.attachment, context) : await uploadChatAttachmentWithFetch(input.attachment, context);
+    const normalized = normalizeRequiredAttachment(uploaded);
+    if (this.config.requireEncryptedAttachments && !isEncryptedChatAttachment(normalized)) {
+      throw new Error("chat_attachment_encryption_required");
+    }
+    if (this.config.requireEncryptedAttachments && !hasChatAttachmentDownloadCapability(normalized)) {
+      throw new Error("chat_attachment_download_capability_required");
+    }
+    return normalized;
   }
   async sendAttachment(inputOrRoomId, attachment, options) {
     const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, attachment } : inputOrRoomId;
+    const { attachment: attachmentUpload, ...message } = input;
+    return this.sendAttachments({
+      ...message,
+      attachments: [attachmentUpload]
+    });
+  }
+  async sendAttachments(inputOrRoomId, attachments, options) {
+    const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, attachments: attachments ?? [] } : inputOrRoomId;
     const roomId = input.roomId?.trim();
     if (!roomId) throw new Error("chat_room_id_required");
-    const uploaded = await this.uploadAttachment({ roomId, attachment: input.attachment });
+    if (!Array.isArray(input.attachments) || input.attachments.length === 0) {
+      throw new Error("chat_attachments_required");
+    }
+    const uploadedAttachments = [];
+    for (const attachmentUpload of input.attachments) {
+      if (!attachmentUpload) throw new Error("chat_attachment_required");
+      uploadedAttachments.push(
+        await this.uploadAttachment({ roomId, attachment: attachmentUpload })
+      );
+    }
+    const firstAttachment = uploadedAttachments[0];
     const metadata = buildChatMessageMetadata({
       ...input,
       roomId,
       metadata: {
         ...input.metadata ?? {},
         attachment: true,
-        ...uploaded.mimeType ? { mimeType: uploaded.mimeType } : {},
-        ...typeof uploaded.size === "number" ? { size: uploaded.size } : {}
+        attachmentCount: uploadedAttachments.length,
+        ...uploadedAttachments.length === 1 && firstAttachment?.mimeType ? { mimeType: firstAttachment.mimeType } : {},
+        ...uploadedAttachments.length === 1 && typeof firstAttachment?.size === "number" ? { size: firstAttachment.size } : {}
       },
       displayName: this.config.displayName
     });
     const providerDirectMessageRoomId = extractProviderDirectMessageRoomId(metadata);
+    const { attachments: _attachmentUploads, ...message } = input;
     return this.sendMessageInput(
       {
-        ...input,
+        ...message,
         roomId,
         body: input.body ?? "",
-        attachments: [uploaded],
+        attachments: uploadedAttachments,
         metadata,
         targetRoomId: input.targetRoomId ?? providerDirectMessageRoomId ?? roomId
       },
       "user"
     );
   }
+  /**
+   * Send a recording as a voice message.
+   *
+   * Only container and duration are checked — they are the two things that can
+   * break a message. Sample rate, channels and bit rate do not affect playback,
+   * and the SDK is handed a file URI rather than bytes on React Native, so it
+   * could not read them back regardless; the recorder helpers above are what
+   * keep those aligned.
+   */
+  async sendVoiceMessage(input) {
+    const { attachment, durationMs, metadata: callerMetadata, ...message } = input;
+    if (!attachment) {
+      throw new Error("chat_attachment_required");
+    }
+    if (normalizeVoiceMimeType(attachment.mimeType) !== CHAT_VOICE_SPEC.mimeType) {
+      throw new Error("chat_voice_mime_type_invalid");
+    }
+    const roundedDurationMs = Math.round(durationMs);
+    if (!Number.isFinite(roundedDurationMs) || roundedDurationMs < CHAT_VOICE_SPEC.minDurationMs) {
+      throw new Error("chat_voice_duration_too_short");
+    }
+    const voiceMetadata = {
+      voiceMessage: true,
+      voiceDurationMs: roundedDurationMs,
+      messageType: firstString(callerMetadata?.messageType) ?? CHAT_VOICE_MESSAGE_TYPE
+    };
+    return this.sendAttachments({
+      ...message,
+      attachments: [
+        {
+          ...attachment,
+          name: normalizeVoiceAttachmentName(attachment.name),
+          // The codec parameter belongs to the recorder, not the wire.
+          mimeType: CHAT_VOICE_SPEC.mimeType,
+          metadata: { ...attachment.metadata ?? {}, ...voiceMetadata }
+        }
+      ],
+      body: "",
+      metadata: { ...callerMetadata ?? {}, ...voiceMetadata }
+    });
+  }
   async sendMessage(inputOrRoomId, body, options) {
     const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, body: body ?? "" } : inputOrRoomId;
     return this.sendMessageInput(input, "resource");
   }
-  async sendMessageInput(input, defaultTargetScope) {
+  async sendMessageInput(input, defaultTargetScope, editServerAcceptedAt) {
+    const sendStartedAt = Date.now();
     const messageBody = input.body ?? "";
     const attachments = normalizeAttachmentPayload(input.attachments);
     if (!messageBody.trim() && !attachments?.length) throw new Error("chat_body_required");
+    if (this.config.requireEncryptedAttachments && attachments?.some((attachment) => !isEncryptedChatAttachment(attachment))) {
+      throw new Error("chat_attachment_encryption_required");
+    }
+    if (this.config.requireEncryptedAttachments && attachments?.some(
+      (attachment) => !hasChatAttachmentDownloadCapability(attachment)
+    )) {
+      throw new Error("chat_attachment_download_capability_required");
+    }
     const metadata = normalizeMessageMetadata(input.metadata, "CHAT_MESSAGE");
+    const editTargetId = trimToUndefined(typeof metadata.replacesId === "string" ? metadata.replacesId : void 0);
+    const isEdit = metadata.edited === true;
+    if (!isEdit) delete metadata.replacesId;
+    let originalForEdit;
+    if (isEdit) {
+      if (!editTargetId || metadata.edited !== true || metadata.messageType !== "CHAT_MESSAGE" || attachments?.length || !input.roomId) {
+        throw new Error("chat_edit_not_allowed");
+      }
+      originalForEdit = await this.resolveEditTarget(input.roomId, editTargetId);
+      const error = getMessageEditError(originalForEdit, this.getDeviceId() ?? "");
+      if (error && !(error === "chat_edit_expired" && editServerAcceptedAt !== void 0)) throw new Error(error);
+      const editTimestamp = parseMetadataTimestamp(metadata) ?? Date.now();
+      const timestampError = getMessageEditError(originalForEdit, this.getDeviceId() ?? "", editTimestamp);
+      if (timestampError) throw new Error(timestampError);
+      metadata.sentAtMs = editTimestamp;
+    } else if (!parseMetadataTimestamp(metadata)) {
+      metadata.sentAtMs = Date.now();
+    }
     await this.connect();
     const xmpp = this.requireXmpp();
     const id = input.id || generateMessageId();
     const roomId = input.roomId?.trim();
     const targetRoomId = input.targetRoomId?.trim() || roomId;
     const targetScope = input.targetScope ?? defaultTargetScope;
-    const targetDeviceIds = await this.resolveRoomTargets({
+    const groupRoom = this.getGroupRoomForTransport(targetRoomId) ?? this.getGroupRoomForTransport(roomId);
+    if (groupRoom) {
+      await this.ensureGroupRoomJoined(groupRoom.roomId);
+    }
+    const targetDeviceIds = groupRoom ? [groupRoom.mucJid] : await this.resolveRoomTargets({
       roomId: targetRoomId,
       explicitDeviceIds: collectTargetDeviceIds(input),
       targetScope
@@ -366,26 +1329,70 @@ var LulaChatClient = class {
       hasAttachments: Boolean(attachments?.length),
       messageType: metadata.messageType
     });
-    await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
-      const encodedPayload = await this.encodePayload({
-        toDeviceId,
-        body: messageBody,
-        metadata,
-        attachments
+    if (this.config.awaitServerAcknowledgement && xmpp.streamManagement.enabled !== true) {
+      throw new Error("chat_stream_management_unavailable");
+    }
+    const serverAckPromise = this.config.awaitServerAcknowledgement ? this.createServerAckWaiter(id, targetDeviceIds) : null;
+    try {
+      const sentTargets = await this.sendToTargets(targetDeviceIds, async (toDeviceId) => {
+        const encodedPayload = await this.encodePayload({
+          toDeviceId,
+          ...groupRoom ? { recipientJids: this.getGroupEncryptionRecipientJids(groupRoom) } : {},
+          body: messageBody,
+          metadata,
+          attachments
+        });
+        const children = [
+          (0, import_client.xml)("body", {}, encodedPayload.body ?? messageBody),
+          ...encodedPayload.children,
+          // Keep the application-generated id stable when a stanza is replayed
+          // by stream management or resent from a durable client outbox.
+          (0, import_client.xml)("origin-id", { xmlns: XMPP_STABLE_ID_NS, id })
+        ];
+        if (roomId) children.push((0, import_client.xml)("thread", {}, roomId));
+        const emergency = parseEmergencyMetadata(metadata);
+        if (emergency) {
+          children.push(
+            (0, import_client.xml)("emergency", {
+              xmlns: XMPP_EMERGENCY_NS,
+              type: emergency.emergencyType,
+              "alert-id": emergency.alertId,
+              "triggered-at": emergency.triggeredAt
+            })
+          );
+        }
+        if (metadata.messageType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE) {
+          children.push((0, import_client.xml)("store", { xmlns: XMPP_HINTS_NS }));
+        }
+        if (!groupRoom && input.requestReceipt !== false) {
+          children.push((0, import_client.xml)("request", { xmlns: XMPP_RECEIPTS_NS }));
+          children.push((0, import_client.xml)("markable", { xmlns: XMPP_CHAT_MARKERS_NS }));
+        }
+        if (isEdit && editServerAcceptedAt === void 0) {
+          originalForEdit = await this.resolveEditTarget(input.roomId, editTargetId);
+          const error = getMessageEditError(originalForEdit, this.getDeviceId() ?? "");
+          if (error) throw new Error(error);
+        }
+        await xmpp.send(
+          (0, import_client.xml)(
+            "message",
+            { to: toDeviceId, type: groupRoom ? "groupchat" : "chat", id },
+            ...children
+          )
+        );
       });
-      const children = [
-        (0, import_client.xml)("body", {}, encodedPayload.body ?? messageBody),
-        ...encodedPayload.children
-      ];
-      if (roomId) children.push((0, import_client.xml)("thread", {}, roomId));
-      if (input.requestReceipt !== false) {
-        children.push((0, import_client.xml)("request", { xmlns: XMPP_RECEIPTS_NS }));
-        children.push((0, import_client.xml)("markable", { xmlns: XMPP_CHAT_MARKERS_NS }));
+      if (serverAckPromise) {
+        this.updateServerAckExpectedTargets(id, sentTargets);
+        await xmpp.send((0, import_client.xml)("r", { xmlns: XMPP_STREAM_MANAGEMENT_NS }));
+        await serverAckPromise;
       }
-      await xmpp.send((0, import_client.xml)("message", { to: toDeviceId, type: "chat", id }, ...children));
-    });
+    } catch (error) {
+      this.cancelServerAckWaiter(id);
+      throw error;
+    }
     this.log("info", "chat_message_sent", {
       id,
+      durationMs: Date.now() - sendStartedAt,
       roomId,
       targetRoomId,
       targetScope,
@@ -396,6 +1403,16 @@ var LulaChatClient = class {
     if (targetRoomId && targetRoomId !== roomId) {
       this.rememberRoomPeers(targetRoomId, targetDeviceIds);
     }
+    if (roomId) {
+      this.rememberMessageAuthor(roomId, id, this.getDeviceId());
+      if (!isEdit) this.rememberEditTarget(roomId, id, {
+        authorAddress: this.getDeviceId() ?? "",
+        timestamp: this.serverMessageTimestamps.get(this.editTargetKey(roomId, id)) ?? 0,
+        body: messageBody,
+        hasAttachments: Boolean(attachments?.length),
+        metadata
+      });
+    }
     return id;
   }
   async sendTyping(inputOrRoomId, options) {
@@ -404,7 +1421,12 @@ var LulaChatClient = class {
     if (!roomId) throw new Error("chat_room_id_required");
     const isTyping = input.isTyping ?? true;
     const targetScope = input.targetScope ?? "user";
-    const targetDeviceIds = await this.resolveRoomTargets({
+    const groupRoom = this.getGroupRoomForTransport(roomId);
+    if (groupRoom) {
+      await this.connect();
+      await this.ensureGroupRoomJoined(groupRoom.roomId);
+    }
+    const targetDeviceIds = groupRoom ? [groupRoom.mucJid] : await this.resolveRoomTargets({
       roomId,
       explicitDeviceIds: collectTargetDeviceIds(input),
       targetScope
@@ -426,7 +1448,7 @@ var LulaChatClient = class {
       (toDeviceId) => this.requireXmpp().send(
         (0, import_client.xml)("message", {
           to: toDeviceId,
-          type: "chat",
+          type: groupRoom ? "groupchat" : "chat",
           id: input.id || `typing-${Date.now()}`
         }, ...children)
       )
@@ -440,13 +1462,67 @@ var LulaChatClient = class {
       targetCount: targetDeviceIds.length
     });
   }
+  async sendThreadGone(inputOrRoomId, options) {
+    const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId } : inputOrRoomId;
+    const roomId = input.roomId.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+    const targetRoomId = input.targetRoomId?.trim() || roomId;
+    const targetScope = input.targetScope ?? "user";
+    const groupRoom = this.getGroupRoomForTransport(targetRoomId) ?? this.getGroupRoomForTransport(roomId);
+    if (groupRoom) {
+      await this.connect();
+      await this.ensureGroupRoomJoined(groupRoom.roomId);
+    }
+    const targetDeviceIds = groupRoom ? [groupRoom.mucJid] : await this.resolveRoomTargets({
+      roomId: targetRoomId,
+      explicitDeviceIds: collectTargetDeviceIds(input),
+      targetScope
+    });
+    const id = input.id?.trim() || `gone-${generateMessageId()}`;
+    this.log("debug", "chat_thread_gone_send_started", {
+      id,
+      roomId,
+      targetRoomId,
+      targetScope,
+      targetCount: targetDeviceIds.length
+    });
+    this.rememberRoomPeers(roomId, targetDeviceIds);
+    if (targetRoomId !== roomId) {
+      this.rememberRoomPeers(targetRoomId, targetDeviceIds);
+    }
+    this.clearTypingAutoPause(roomId);
+    await this.connect();
+    await this.sendToTargets(
+      targetDeviceIds,
+      (toDeviceId) => this.requireXmpp().send(
+        (0, import_client.xml)(
+          "message",
+          { to: toDeviceId, type: groupRoom ? "groupchat" : "chat", id },
+          (0, import_client.xml)("thread", {}, roomId),
+          (0, import_client.xml)("gone", { xmlns: XMPP_CHATSTATES_NS })
+        )
+      )
+    );
+    this.log("debug", "chat_thread_gone_sent", {
+      id,
+      roomId,
+      targetRoomId,
+      targetCount: targetDeviceIds.length
+    });
+    return id;
+  }
   async markRead(inputOrRoomId, messageId, options) {
     const input = typeof inputOrRoomId === "string" ? { ...options ?? {}, roomId: inputOrRoomId, messageId: messageId ?? "" } : inputOrRoomId;
     const roomId = input.roomId.trim();
     if (!roomId) throw new Error("chat_room_id_required");
     if (!input.messageId.trim()) throw new Error("chat_message_id_required");
     const targetScope = input.targetScope ?? "user";
-    const targetDeviceIds = await this.resolveRoomTargets({
+    const groupRoom = this.getGroupRoomForTransport(roomId);
+    if (groupRoom) {
+      await this.connect();
+      await this.ensureGroupRoomJoined(groupRoom.roomId);
+    }
+    const targetDeviceIds = groupRoom ? [groupRoom.mucJid] : await this.resolveRoomTargets({
       roomId,
       explicitDeviceIds: collectTargetDeviceIds(input),
       targetScope
@@ -468,7 +1544,7 @@ var LulaChatClient = class {
       (toDeviceId) => this.requireXmpp().send(
         (0, import_client.xml)("message", {
           to: toDeviceId,
-          type: "chat",
+          type: groupRoom ? "groupchat" : "chat",
           id: input.id || `displayed-${Date.now()}`
         }, ...children)
       )
@@ -488,35 +1564,74 @@ var LulaChatClient = class {
       );
       if (typeof resolved === "string" && resolved.trim()) return resolved.trim();
     }
+    if (isEncryptedChatAttachment(normalized)) {
+      throw new Error("chat_attachment_resolver_required");
+    }
     return defaultAttachmentSource(normalized);
   }
   onMessage(listener) {
-    return addListener(this.messageListeners, listener);
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
   }
   onChatMessage(listener) {
-    return this.onMessage((message) => {
+    return this.onMessage((message, delivery) => {
+      if (isConversationStateMessage(message)) return;
       if (isFormSubmissionMessage(message)) return;
       if (isAttachmentMessage(message)) return;
-      listener(toChatTextMessage(message));
+      if (isEmergencyMessage(message)) return;
+      listener(toChatTextMessage(message), delivery);
+    });
+  }
+  onEmergency(listener) {
+    return this.onMessage((message, delivery) => {
+      const emergency = parseChatEmergencyMessage(message);
+      if (emergency) listener(emergency, delivery);
     });
   }
   onAttachmentMessage(listener) {
-    return this.onMessage((message) => {
+    return this.onMessage((message, delivery) => {
       if (!isAttachmentMessage(message)) return;
-      listener(toChatAttachmentMessage(message));
+      listener(toChatAttachmentMessage(message), delivery);
     });
   }
   onFormSubmission(listener) {
-    return this.onMessage((message) => {
+    return this.onMessage((message, delivery) => {
       const parsed = parseFormSubmissionMessage(message);
-      if (parsed) listener(parsed);
+      if (parsed) listener(parsed, delivery);
     });
+  }
+  onConversationState(listener) {
+    return this.onMessage((message, delivery) => {
+      const event = parseConversationStateMessage(message);
+      if (event) listener(event, delivery);
+    });
+  }
+  onGroupInvitation(listener) {
+    return addListener(this.groupInvitationListeners, listener);
+  }
+  onThreadGone(listener) {
+    return addListener(this.threadGoneListeners, listener);
+  }
+  onServerEvent(listener) {
+    return addListener(this.serverEventListeners, listener);
+  }
+  onRetraction(listener) {
+    return addListener(this.retractionListeners, listener);
   }
   onTyping(listener) {
     return addListener(this.typingListeners, listener);
   }
   onDelivery(listener) {
     return addListener(this.deliveryListeners, listener);
+  }
+  onServerAcknowledged(listener) {
+    return addListener(this.serverAcknowledgementListeners, listener);
+  }
+  onServerSendFailed(listener) {
+    return addListener(this.serverSendFailureListeners, listener);
+  }
+  onStreamManagement(listener) {
+    return addListener(this.streamManagementListeners, listener);
   }
   onError(listener) {
     return addListener(this.errorListeners, listener);
@@ -559,6 +1674,9 @@ var LulaChatClient = class {
     return this.config.userId;
   }
   async connectFresh() {
+    if (this.xmpp) {
+      await this.stop();
+    }
     this.setStatus("connecting");
     this.log("info", "chat_connect_started", {
       service: this.config.service,
@@ -580,11 +1698,21 @@ var LulaChatClient = class {
       registerXOAuth2OnClient(xmpp);
     }
     this.bindXmppEvents(xmpp);
+    this.bindStreamManagementEvents(xmpp);
     try {
       await withTimeout(
         xmpp.start(),
         this.config.connectTimeoutMs,
         "chat_connect_timeout"
+      );
+      const onlineReadiness = this.onlineReadinessPromise;
+      if (!onlineReadiness) {
+        throw new Error("chat_online_readiness_missing");
+      }
+      await withTimeout(
+        onlineReadiness,
+        this.config.connectTimeoutMs,
+        "chat_online_readiness_timeout"
       );
     } catch (error) {
       this.xmpp = null;
@@ -625,44 +1753,81 @@ var LulaChatClient = class {
     };
   }
   bindXmppEvents(xmpp) {
-    xmpp.on("online", async (address) => {
+    xmpp.on("online", (address) => {
+      if (this.xmpp !== xmpp) return;
       this.onlineDeviceId = addressToString(address) ?? this.config.deviceId;
-      this.setStatus("online");
-      this.log("info", "chat_online", {
-        deviceId: this.onlineDeviceId,
-        bareDeviceId: this.getBareDeviceId()
-      });
-      await xmpp.send((0, import_client.xml)("presence"));
-      try {
-        await this.enableMessageCarbons();
-        this.log("debug", "chat_carbons_enabled", {
-          deviceId: this.onlineDeviceId
+      this.onlineReadinessPromise = (async () => {
+        const streamManagement = xmpp.streamManagement;
+        const streamManagementRequired = this.config.requireStreamManagement || this.config.awaitServerAcknowledgement;
+        const streamManagementEnabled = streamManagementRequired ? await this.waitForStreamManagementNegotiation(xmpp) : streamManagement.enabled === true;
+        if (this.xmpp !== xmpp) return;
+        if (streamManagementRequired && !streamManagementEnabled) {
+          throw new Error("chat_stream_management_required");
+        }
+        if (streamManagementEnabled) {
+          this.emit(this.streamManagementListeners, {
+            state: "enabled",
+            resumable: Boolean(streamManagement.id)
+          });
+        }
+        await xmpp.send((0, import_client.xml)("presence"));
+        try {
+          await this.enableMessageCarbons();
+          this.log("debug", "chat_carbons_enabled", {
+            deviceId: this.onlineDeviceId
+          });
+        } catch (error) {
+          this.log("warn", "chat_carbons_enable_failed", { error });
+          if (this.config.requireMessageCarbons) {
+            throw new Error("chat_carbons_required", { cause: error });
+          }
+        }
+        try {
+          await this.config.encryption?.onConnect?.(this.getEncryptionContext());
+          this.log("debug", "chat_encryption_connected", {
+            deviceId: this.getBareDeviceId()
+          });
+        } catch (error) {
+          this.log("error", "chat_encryption_connect_failed", { error });
+          this.emit(this.errorListeners, { error });
+        }
+        if (this.xmpp !== xmpp) return;
+        await this.rejoinGroupRooms();
+        if (this.xmpp !== xmpp) return;
+        this.setStatus("online");
+        this.log("info", "chat_online", {
+          deviceId: this.onlineDeviceId,
+          bareDeviceId: this.getBareDeviceId()
         });
-      } catch (error) {
-        this.log("warn", "chat_carbons_enable_failed", { error });
-      }
-      try {
-        await this.config.encryption?.onConnect?.(this.getEncryptionContext());
-        this.log("debug", "chat_encryption_connected", {
-          deviceId: this.getBareDeviceId()
-        });
-      } catch (error) {
-        this.log("error", "chat_encryption_connect_failed", { error });
+      })();
+      this.onlineReadinessPromise.catch((error) => {
+        if (this.xmpp !== xmpp) return;
+        this.setStatus("error", error);
         this.emit(this.errorListeners, { error });
-      }
+      });
     });
     xmpp.on("offline", () => {
+      if (this.xmpp !== xmpp) return;
+      this.config.encryption?.onDisconnect?.(this.getEncryptionContext());
       this.setStatus("offline");
       this.onlineDeviceId = void 0;
+      this.onlineReadinessPromise = null;
+      this.joinedGroupRooms.clear();
+      this.mucOccupantRealJids.clear();
+      this.clearAllGroupJoinRetries();
+      this.rejectPendingGroupJoins(new Error("chat_muc_offline"));
       this.log("warn", "chat_offline");
       this.rejectPendingIq(new Error("chat_iq_offline"));
+      this.rejectServerAckWaiters(new Error("chat_stream_offline"));
     });
     xmpp.on("error", (error) => {
+      if (this.xmpp !== xmpp) return;
       this.log("error", "chat_xmpp_error", { error });
       this.emit(this.errorListeners, { error });
       this.setStatus("error", error);
     });
     xmpp.on("stanza", (stanza) => {
+      if (this.xmpp !== xmpp) return;
       this.handleStanza(stanza).catch((error) => {
         this.emit(this.errorListeners, { error, raw: stanza });
       });
@@ -674,27 +1839,456 @@ var LulaChatClient = class {
       payload: (0, import_client.xml)("enable", { xmlns: XMPP_CARBONS_NS })
     });
   }
+  async waitForStreamManagementNegotiation(xmpp) {
+    const streamManagement = xmpp.streamManagement;
+    if (streamManagement.enabled === true) return true;
+    const timeoutMs = Math.max(250, Math.min(this.config.connectTimeoutMs, 1e4));
+    this.log("debug", "chat_stream_management_negotiation_wait", {
+      timeoutMs,
+      enableSent: streamManagement.enableSent === true
+    });
+    return new Promise((resolve) => {
+      let settled = false;
+      let pollTimer;
+      let timeoutTimer;
+      const cleanup = () => {
+        if (pollTimer) clearInterval(pollTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        xmpp.removeListener("element", onElement);
+        xmpp.removeListener("offline", onOffline);
+      };
+      const finish = (enabled) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.log(enabled ? "debug" : "warn", "chat_stream_management_negotiation_complete", {
+          enabled,
+          enableSent: streamManagement.enableSent === true,
+          resumable: Boolean(streamManagement.id)
+        });
+        resolve(enabled);
+      };
+      const checkEnabled = () => {
+        if (streamManagement.enabled === true) finish(true);
+      };
+      const onElement = (element) => {
+        if (element.is?.("failed", XMPP_STREAM_MANAGEMENT_NS)) {
+          finish(false);
+          return;
+        }
+        if (element.is?.("enabled", XMPP_STREAM_MANAGEMENT_NS)) {
+          queueMicrotask(checkEnabled);
+        }
+      };
+      const onOffline = () => finish(false);
+      xmpp.on("element", onElement);
+      xmpp.on("offline", onOffline);
+      pollTimer = setInterval(checkEnabled, 10);
+      timeoutTimer = setTimeout(() => finish(streamManagement.enabled === true), timeoutMs);
+      checkEnabled();
+    });
+  }
+  bindStreamManagementEvents(xmpp) {
+    const streamManagement = xmpp.streamManagement;
+    streamManagement.on?.("ack", (stanza) => {
+      if (this.xmpp !== xmpp) return;
+      if (!stanza || !stanza.is?.("message") && stanza.name !== "message") return;
+      const id = trimToUndefined(stanza.attrs?.id);
+      if (!id) return;
+      const target = normalizeTransportAddress(stanza.attrs?.to);
+      const waiter = this.serverAckWaiters.get(id);
+      if (waiter && target) {
+        waiter.acknowledgedTargets.add(target);
+        this.resolveServerAckWaiterIfComplete(id, waiter);
+      }
+      this.emit(this.serverAcknowledgementListeners, {
+        id,
+        acknowledgedAt: Date.now(),
+        ...target ? { toDeviceId: target } : {},
+        ...trimToUndefined(stanza.getChildText?.("thread")) ? { roomId: trimToUndefined(stanza.getChildText?.("thread")) } : {},
+        raw: stanza
+      });
+    });
+    streamManagement.on?.("fail", (stanza) => {
+      if (this.xmpp !== xmpp) return;
+      if (!stanza || !stanza.is?.("message") && stanza.name !== "message") return;
+      const id = trimToUndefined(stanza.attrs?.id);
+      if (!id) return;
+      const waiter = this.serverAckWaiters.get(id);
+      if (waiter) {
+        this.serverAckWaiters.delete(id);
+        waiter.reject(new Error(`chat_server_ack_failed:${id}`));
+      }
+      const target = normalizeTransportAddress(stanza.attrs?.to);
+      this.emit(this.serverSendFailureListeners, {
+        id,
+        failedAt: Date.now(),
+        ...target ? { toDeviceId: target } : {},
+        ...trimToUndefined(stanza.getChildText?.("thread")) ? { roomId: trimToUndefined(stanza.getChildText?.("thread")) } : {},
+        raw: stanza
+      });
+      this.emit(this.streamManagementListeners, {
+        state: "failed",
+        resumable: false
+      });
+    });
+    streamManagement.on?.("resumed", () => {
+      if (this.xmpp !== xmpp) return;
+      this.setStatus("online");
+      this.emit(this.streamManagementListeners, {
+        state: "resumed",
+        resumable: true
+      });
+      this.log("info", "chat_stream_resumed");
+    });
+  }
+  createServerAckWaiter(messageId, targets) {
+    this.cancelServerAckWaiter(messageId);
+    let resolve;
+    let reject;
+    const promise = new Promise((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    promise.catch(() => {
+    });
+    this.serverAckWaiters.set(messageId, {
+      expectedTargets: new Set(normalizeTransportAddressList(targets)),
+      acknowledgedTargets: /* @__PURE__ */ new Set(),
+      promise,
+      resolve,
+      reject
+    });
+    return promise;
+  }
+  updateServerAckExpectedTargets(messageId, targets) {
+    const waiter = this.serverAckWaiters.get(messageId);
+    if (!waiter) return;
+    waiter.expectedTargets = new Set(normalizeTransportAddressList(targets));
+    this.resolveServerAckWaiterIfComplete(messageId, waiter);
+  }
+  resolveServerAckWaiterIfComplete(messageId, waiter) {
+    if (!waiter.expectedTargets.size) return;
+    const complete = Array.from(waiter.expectedTargets).every(
+      (target) => waiter.acknowledgedTargets.has(target)
+    );
+    if (!complete) return;
+    this.serverAckWaiters.delete(messageId);
+    waiter.resolve();
+  }
+  cancelServerAckWaiter(messageId) {
+    const waiter = this.serverAckWaiters.get(messageId);
+    if (!waiter) return;
+    this.serverAckWaiters.delete(messageId);
+    waiter.reject(new Error(`chat_server_ack_cancelled:${messageId}`));
+  }
+  rejectServerAckWaiters(error) {
+    const waiters = Array.from(this.serverAckWaiters.values());
+    this.serverAckWaiters.clear();
+    waiters.forEach((waiter) => waiter.reject(error));
+  }
   unwrapCarbonMessage(stanza) {
     const sent = stanza.getChild?.("sent", XMPP_CARBONS_NS);
     const received = stanza.getChild?.("received", XMPP_CARBONS_NS);
     const carbon = sent ?? received;
+    if (carbon && addressToString(stanza.attrs?.from)?.toLowerCase() !== normalizeBareDeviceId(this.getDeviceId()).toLowerCase()) return null;
     const direction = sent ? "sent" : received ? "received" : void 0;
     const forwarded = carbon?.getChild?.("forwarded", XMPP_FORWARD_NS);
     const message = forwarded?.getChild?.("message", "jabber:client") ?? forwarded?.getChild?.("message");
     if (!direction || !message) return null;
-    return { direction, message };
+    const timestamp = forwarded ? parseDelayTimestamp(forwarded) : void 0;
+    return { direction, message, ...timestamp !== void 0 ? { timestamp } : {} };
+  }
+  normalizeGroupRoom(room) {
+    const roomId = room.roomId.trim();
+    if (!roomId) throw new Error("chat_room_id_required");
+    const mucJid = normalizeBareDeviceId(room.mucJid).toLowerCase();
+    if (!mucJid || !mucJid.includes("@")) {
+      throw new Error("chat_muc_jid_required");
+    }
+    const ownBareJid = normalizeBareDeviceId(this.config.deviceId).toLowerCase();
+    const memberJids = Array.from(
+      new Set(
+        [ownBareJid, ...room.memberJids].map((jid) => normalizeBareDeviceId(jid).toLowerCase()).filter(Boolean)
+      )
+    );
+    return {
+      roomId,
+      mucJid,
+      memberJids,
+      ...trimToUndefined(room.nickname) ? { nickname: trimToUndefined(room.nickname) } : {}
+    };
+  }
+  rememberGroupRoom(room) {
+    const previous = this.groupRooms.get(room.roomId);
+    if (previous && previous.mucJid !== room.mucJid) {
+      this.groupRoomIdsByMucJid.delete(previous.mucJid);
+      this.joinedGroupRooms.delete(room.roomId);
+    }
+    this.groupRooms.set(room.roomId, room);
+    this.groupRoomIdsByMucJid.set(room.mucJid, room.roomId);
+  }
+  getGroupNickname(room) {
+    const preferred = room.nickname ?? `${this.config.userId}-${this.config.localDeviceId}`;
+    return preferred.trim().replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^[._-]+|[._-]+$/g, "").slice(0, 96) || `device-${this.config.localDeviceId}`;
+  }
+  async ensureGroupRoomJoined(roomId) {
+    if (this.joinedGroupRooms.has(roomId)) return;
+    const pending = this.pendingGroupJoins.get(roomId);
+    if (pending) {
+      await pending.promise;
+      return;
+    }
+    const room = this.groupRooms.get(roomId);
+    if (!room) throw new Error(`chat_muc_room_unknown:${roomId}`);
+    const occupantJid = `${room.mucJid}/${this.getGroupNickname(room)}`;
+    let resolveJoin;
+    let rejectJoin;
+    const joined = new Promise((resolve, reject) => {
+      resolveJoin = resolve;
+      rejectJoin = reject;
+    });
+    const timeout = setTimeout(() => {
+      this.pendingGroupJoins.delete(roomId);
+      rejectJoin(new Error(`chat_muc_join_timeout:${roomId}`));
+    }, DEFAULT_MUC_JOIN_TIMEOUT_MS);
+    this.pendingGroupJoins.set(roomId, {
+      promise: joined,
+      resolve: resolveJoin,
+      reject: rejectJoin,
+      timeout
+    });
+    joined.catch(() => {
+    });
+    try {
+      await this.requireXmpp().send(
+        (0, import_client.xml)(
+          "presence",
+          { to: occupantJid },
+          (0, import_client.xml)("x", { xmlns: XMPP_MUC_NS })
+        )
+      );
+      await joined;
+    } catch (error) {
+      const waiter = this.pendingGroupJoins.get(roomId);
+      if (waiter) {
+        clearTimeout(waiter.timeout);
+        this.pendingGroupJoins.delete(roomId);
+        waiter.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+      throw error;
+    }
+  }
+  clearGroupJoinRetry(roomId) {
+    const timer = this.groupJoinRetryTimers.get(roomId);
+    if (timer) clearTimeout(timer);
+    this.groupJoinRetryTimers.delete(roomId);
+    this.groupJoinRetryAttempts.delete(roomId);
+  }
+  clearAllGroupJoinRetries() {
+    for (const timer of this.groupJoinRetryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.groupJoinRetryTimers.clear();
+    this.groupJoinRetryAttempts.clear();
+  }
+  scheduleGroupJoinRetry(roomId) {
+    if (this.joinedGroupRooms.has(roomId) || this.groupJoinRetryTimers.has(roomId) || !this.groupRooms.has(roomId)) {
+      return;
+    }
+    const attempt = this.groupJoinRetryAttempts.get(roomId) ?? 0;
+    const delayMs = MUC_JOIN_RETRY_DELAYS_MS[attempt];
+    if (delayMs === void 0) {
+      this.log("warn", "chat_muc_join_retry_exhausted", { roomId, attempt });
+      return;
+    }
+    this.groupJoinRetryAttempts.set(roomId, attempt + 1);
+    const timer = setTimeout(() => {
+      this.groupJoinRetryTimers.delete(roomId);
+      if (this.status !== "online" || !this.groupRooms.has(roomId)) return;
+      this.ensureGroupRoomJoined(roomId).catch((error) => {
+        this.log("warn", "chat_muc_join_retry_failed", {
+          roomId,
+          attempt: attempt + 1,
+          error
+        });
+        this.scheduleGroupJoinRetry(roomId);
+      });
+    }, delayMs);
+    this.groupJoinRetryTimers.set(roomId, timer);
+    this.log("info", "chat_muc_join_retry_scheduled", {
+      roomId,
+      attempt: attempt + 1,
+      delayMs
+    });
+  }
+  async rejoinGroupRooms() {
+    this.joinedGroupRooms.clear();
+    const roomIds = Array.from(this.groupRooms.keys());
+    const results = await Promise.allSettled(
+      roomIds.map((roomId) => this.ensureGroupRoomJoined(roomId))
+    );
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        const roomId = roomIds[index];
+        this.log("warn", "chat_muc_rejoin_failed", {
+          roomId,
+          error: result.reason
+        });
+        if (roomId) this.scheduleGroupJoinRetry(roomId);
+      }
+    });
+  }
+  rejectPendingGroupJoins(error) {
+    const pending = Array.from(this.pendingGroupJoins.values());
+    this.pendingGroupJoins.clear();
+    pending.forEach((entry) => {
+      clearTimeout(entry.timeout);
+      entry.reject(error);
+    });
+  }
+  handleGroupPresence(stanza) {
+    const from = addressToString(stanza.attrs?.from) ?? "";
+    const mucJid = normalizeBareDeviceId(from).toLowerCase();
+    const roomId = this.groupRoomIdsByMucJid.get(mucJid);
+    if (!roomId) return;
+    const mucUser = stanza.getChild?.("x", XMPP_MUC_USER_NS) ?? stanza.getChild?.("x");
+    const realJid = trimToUndefined(mucUser?.getChild?.("item")?.attrs?.jid);
+    const occupantKey = from.toLowerCase();
+    if (stanza.attrs?.type === "unavailable") {
+      this.mucOccupantRealJids.delete(occupantKey);
+    } else if (realJid) {
+      this.mucOccupantRealJids.set(occupantKey, realJid);
+    }
+    const room = this.groupRooms.get(roomId);
+    const expectedOccupant = room ? `${room.mucJid}/${this.getGroupNickname(room)}`.toLowerCase() : "";
+    const raw = toRawXmlString(stanza);
+    const isSelfPresence = from.toLowerCase() === expectedOccupant || /<status\b[^>]*\bcode=["']110["']/.test(raw);
+    if (!isSelfPresence) return;
+    const waiter = this.pendingGroupJoins.get(roomId);
+    if (stanza.attrs?.type === "error") {
+      const parsed = parseStanzaError(stanza);
+      const error = new Error(
+        `chat_muc_join_error:${roomId}:${parsed.condition ?? "unknown"}`
+      );
+      if (waiter) {
+        clearTimeout(waiter.timeout);
+        this.pendingGroupJoins.delete(roomId);
+        waiter.reject(error);
+      }
+      return;
+    }
+    if (stanza.attrs?.type === "unavailable") {
+      this.joinedGroupRooms.delete(roomId);
+      return;
+    }
+    this.joinedGroupRooms.add(roomId);
+    this.clearGroupJoinRetry(roomId);
+    if (waiter) {
+      clearTimeout(waiter.timeout);
+      this.pendingGroupJoins.delete(roomId);
+      waiter.resolve();
+    }
+    this.log("info", "chat_muc_joined", { roomId, mucJid });
+  }
+  getMucRealSenderJid(stanza) {
+    const mucUser = stanza.getChild?.("x", XMPP_MUC_USER_NS) ?? stanza.getChild?.("x");
+    return trimToUndefined(mucUser?.getChild?.("item")?.attrs?.jid) ?? this.mucOccupantRealJids.get(
+      (addressToString(stanza.attrs?.from) ?? "").toLowerCase()
+    );
+  }
+  parseGroupInvitation(stanza) {
+    const directInvite = stanza.getChild?.("x", XMPP_DIRECT_MUC_INVITE_NS);
+    const directMucJid = normalizeBareDeviceId(
+      trimToUndefined(directInvite?.attrs?.jid)
+    );
+    if (directMucJid) {
+      const fromJid2 = normalizeBareDeviceId(addressToString(stanza.attrs?.from));
+      return {
+        mucJid: directMucJid,
+        ...fromJid2 ? { fromJid: fromJid2 } : {},
+        ...trimToUndefined(directInvite?.attrs?.reason) ? { reason: trimToUndefined(directInvite?.attrs?.reason) } : {},
+        ...trimToUndefined(directInvite?.attrs?.password) ? { password: trimToUndefined(directInvite?.attrs?.password) } : {},
+        raw: stanza
+      };
+    }
+    const mucUser = stanza.getChild?.("x", XMPP_MUC_USER_NS);
+    const mediatedInvite = mucUser?.getChild?.("invite");
+    if (!mediatedInvite) return null;
+    const mucJid = normalizeBareDeviceId(addressToString(stanza.attrs?.from));
+    if (!mucJid) return null;
+    const fromJid = normalizeBareDeviceId(
+      trimToUndefined(mediatedInvite.attrs?.from)
+    );
+    const reason = trimToUndefined(mediatedInvite.getChildText?.("reason"));
+    const password = trimToUndefined(mucUser?.getChildText?.("password"));
+    return {
+      mucJid,
+      ...fromJid ? { fromJid } : {},
+      ...reason ? { reason } : {},
+      ...password ? { password } : {},
+      raw: stanza
+    };
   }
   async handleStanza(stanza) {
     this.resolvePendingIq(stanza);
+    if (stanza.is?.("presence")) {
+      this.handleGroupPresence(stanza);
+      return;
+    }
     if (!stanza.is?.("message")) return;
+    await this.config.encryption?.onStanza?.(stanza, this.getEncryptionContext());
+    if (stanza.getChild?.("event", XMPP_SERVER_EVENT_NS)) {
+      const serverEvent = parseChatServerEvent(stanza, this.config.domain);
+      if (serverEvent) {
+        if (serverEvent.type === "message_timestamp") {
+          const { messageId, roomId: roomId2, timestamp } = serverEvent.data;
+          if (typeof messageId !== "string" || typeof roomId2 !== "string" || !isServerMessageTimestamp(timestamp)) return;
+          const key = this.editTargetKey(roomId2, messageId);
+          this.serverMessageTimestamps.set(key, timestamp);
+          const target = this.editTargets.get(key);
+          if (target) target.timestamp = timestamp;
+          if (this.serverMessageTimestamps.size > 2e3)
+            this.serverMessageTimestamps.delete(this.serverMessageTimestamps.keys().next().value);
+        }
+        this.log("debug", "chat_server_event_received", {
+          id: serverEvent.id,
+          type: serverEvent.type
+        });
+        this.emit(this.serverEventListeners, serverEvent);
+      } else {
+        this.log("warn", "chat_server_event_rejected", {
+          id: stanza.attrs?.id,
+          from: addressToString(stanza.attrs?.from)
+        });
+      }
+      return;
+    }
     const carbon = this.unwrapCarbonMessage(stanza);
+    if (!carbon && (stanza.getChild?.("sent", XMPP_CARBONS_NS) || stanza.getChild?.("received", XMPP_CARBONS_NS))) return;
     const messageStanza = carbon?.message ?? stanza;
+    const transportTimestamp = parseServerMessageTimestamp(messageStanza, this.config.domain) ?? carbon?.timestamp ?? parseTrustedDelayTimestamp(messageStanza, this.config.domain);
     const attrs = messageStanza.attrs ?? {};
-    const fromFullAddress = normalizeTransportAddress(addressToString(attrs.from));
-    const fromDeviceId = fromFullAddress || normalizeBareDeviceId(addressToString(attrs.from));
+    const groupInvitation = this.parseGroupInvitation(messageStanza);
+    if (groupInvitation) {
+      this.emit(this.groupInvitationListeners, groupInvitation);
+      this.log("info", "chat_muc_invitation_received", {
+        mucJid: groupInvitation.mucJid,
+        fromJid: groupInvitation.fromJid
+      });
+      return;
+    }
+    const isGroupMessage = attrs.type === "groupchat";
+    const mucSenderJid = isGroupMessage ? this.getMucRealSenderJid(messageStanza) : void 0;
+    const stanzaFromAddress = addressToString(attrs.from);
+    const fromFullAddress = normalizeTransportAddress(
+      mucSenderJid ?? stanzaFromAddress
+    );
+    const fromDeviceId = fromFullAddress || normalizeBareDeviceId(mucSenderJid ?? stanzaFromAddress);
     const fromUserId = getUserIdFromChatAddress(fromFullAddress) || "";
-    const toDeviceId = attrs.to ? normalizeTransportAddress(addressToString(attrs.to)) || addressToString(attrs.to) : this.getDeviceId();
-    const roomId = trimToUndefined(messageStanza.getChildText?.("thread") ?? void 0);
+    const toDeviceId = isGroupMessage ? this.getDeviceId() : attrs.to ? normalizeTransportAddress(addressToString(attrs.to)) || addressToString(attrs.to) : this.getDeviceId();
+    const mucRoomId = isGroupMessage ? this.groupRoomIdsByMucJid.get(normalizeBareDeviceId(stanzaFromAddress)) : void 0;
+    const roomId = trimToUndefined(messageStanza.getChildText?.("thread") ?? void 0) ?? mucRoomId;
     this.rememberRoomPeer(roomId, carbon?.direction === "sent" ? toDeviceId : fromDeviceId);
     this.log("debug", "chat_message_stanza_received", {
       id: attrs.id,
@@ -780,8 +2374,37 @@ var LulaChatClient = class {
       });
       return;
     }
+    const retraction = messageStanza.getChild?.("retract", XMPP_RETRACT_NS);
+    if (retraction) {
+      if (transportTimestamp === void 0) return;
+      const targetMessageId = trimToUndefined(retraction.attrs?.id);
+      if (targetMessageId && roomId && toDeviceId) {
+        const eventId = attrs.id || generateMessageId();
+        await this.processRetraction({
+          id: eventId,
+          targetMessageId,
+          fromUserId,
+          fromFullAddress,
+          fromDeviceId,
+          toDeviceId,
+          roomId,
+          timestamp: transportTimestamp,
+          raw: messageStanza
+        });
+      } else {
+        this.log("warn", "chat_message_retraction_ignored_missing_context", {
+          id: attrs.id,
+          targetMessageId,
+          roomId,
+          fromDeviceId,
+          hasToDeviceId: Boolean(toDeviceId)
+        });
+      }
+      return;
+    }
     const composing = messageStanza.getChild?.("composing", XMPP_CHATSTATES_NS);
     const paused = messageStanza.getChild?.("paused", XMPP_CHATSTATES_NS);
+    const gone = messageStanza.getChild?.("gone", XMPP_CHATSTATES_NS);
     if ((composing || paused) && roomId) {
       this.emit(this.typingListeners, {
         fromUserId,
@@ -798,11 +2421,77 @@ var LulaChatClient = class {
         isTyping: Boolean(composing)
       });
     }
+    if (gone) {
+      if (transportTimestamp === void 0) return;
+      if (roomId) {
+        const eventId = attrs.id || generateMessageId();
+        this.emit(this.threadGoneListeners, {
+          id: eventId,
+          fromUserId,
+          fromFullAddress,
+          fromDeviceId,
+          toDeviceId,
+          roomId,
+          timestamp: transportTimestamp,
+          raw: messageStanza
+        });
+        this.log("debug", "chat_thread_gone_received", {
+          id: eventId,
+          roomId,
+          fromDeviceId
+        });
+      } else {
+        this.log("debug", "chat_thread_gone_ignored_missing_room", {
+          id: attrs.id,
+          fromDeviceId
+        });
+      }
+    }
     const decoded = await this.decodePayload(messageStanza);
     const body = decoded.body;
     const attachments = normalizeAttachmentPayload(decoded.attachments);
+    if (this.config.requireEncryptedAttachments && attachments?.some((attachment) => !isEncryptedChatAttachment(attachment))) {
+      const error = new Error("chat_attachment_encryption_required");
+      this.log("warn", "chat_attachment_rejected_unencrypted", {
+        id: attrs.id,
+        roomId,
+        fromDeviceId
+      });
+      this.emit(this.errorListeners, {
+        id: attrs.id,
+        fromUserId: fromUserId || void 0,
+        fromFullAddress: fromFullAddress || void 0,
+        fromDeviceId,
+        toDeviceId,
+        roomId,
+        error,
+        raw: messageStanza
+      });
+      return;
+    }
+    if (this.config.requireEncryptedAttachments && attachments?.some(
+      (attachment) => !hasChatAttachmentDownloadCapability(attachment)
+    )) {
+      const error = new Error("chat_attachment_download_capability_required");
+      this.log("warn", "chat_attachment_rejected_without_capability", {
+        id: attrs.id,
+        roomId,
+        fromDeviceId
+      });
+      this.emit(this.errorListeners, {
+        id: attrs.id,
+        fromUserId: fromUserId || void 0,
+        fromFullAddress: fromFullAddress || void 0,
+        fromDeviceId,
+        toDeviceId,
+        roomId,
+        error,
+        raw: messageStanza
+      });
+      return;
+    }
     if (!body.trim() && !attachments?.length) {
-      this.log("debug", "chat_message_ignored_empty", {
+      this.log("debug", gone ? "chat_message_ignored_chat_state" : "chat_message_ignored_empty", {
         id: attrs.id,
         fromDeviceId,
         roomId
@@ -818,12 +2507,36 @@ var LulaChatClient = class {
       });
       return;
     }
+    const emergencyTag = messageStanza.getChild?.("emergency", XMPP_EMERGENCY_NS);
+    const emergencyTagMetadata = emergencyTag ? {
+      messageType: CHAT_EMERGENCY_MESSAGE_TYPE,
+      emergencyType: emergencyTag.attrs?.type,
+      emergencyAlertId: emergencyTag.attrs?.["alert-id"],
+      emergencyTriggeredAt: emergencyTag.attrs?.["triggered-at"]
+    } : void 0;
+    const originId = trimToUndefined(
+      messageStanza.getChild?.("origin-id", XMPP_STABLE_ID_NS)?.attrs?.id
+    );
+    const decodedMetadata = emergencyTagMetadata ? { ...decoded.metadata ?? {}, ...emergencyTagMetadata } : { ...decoded.metadata ?? {} };
+    if (originId) decodedMetadata.originId = originId;
     const metadata = normalizeMessageMetadata(
-      decoded.metadata,
-      inferMessageType(decoded.metadata, body)
+      decodedMetadata,
+      inferMessageType(decodedMetadata, body)
     );
     const emittedMessageId = attrs.id || generateMessageId();
-    this.emit(this.messageListeners, {
+    if (transportTimestamp === void 0) {
+      this.log("warn", "chat_message_server_timestamp_missing", { id: emittedMessageId, roomId });
+      this.emit(this.errorListeners, {
+        id: emittedMessageId,
+        roomId,
+        fromDeviceId,
+        error: new Error("chat_message_server_timestamp_missing"),
+        raw: messageStanza
+      });
+      return;
+    }
+    metadata.serverTimestampMs = transportTimestamp;
+    const message = {
       id: emittedMessageId,
       fromUserId,
       fromFullAddress,
@@ -831,11 +2544,48 @@ var LulaChatClient = class {
       toDeviceId,
       roomId,
       body,
-      timestamp: parseDelayTimestamp(messageStanza) ?? parseMetadataTimestamp(metadata) ?? Date.now(),
+      timestamp: transportTimestamp,
       metadata,
       ...attachments?.length ? { attachments } : {},
       raw: messageStanza
-    });
+    };
+    const originalAuthorAddress = fromFullAddress || fromDeviceId;
+    const receiptRequest = messageStanza.getChild?.("request", XMPP_RECEIPTS_NS);
+    const receiptRequested = Boolean(
+      !carbon && !isGroupMessage && attrs.id && receiptRequest && fromDeviceId
+    );
+    let receiptSent = false;
+    let receiptPromise = null;
+    const delivery = {
+      receiptRequested,
+      acknowledgeDelivered: async () => {
+        if (!receiptRequested || receiptSent) return;
+        if (!receiptPromise) {
+          receiptPromise = this.sendReceipt({
+            toDeviceId: fromDeviceId,
+            roomId,
+            messageId: attrs.id
+          }).then(() => {
+            receiptSent = true;
+            this.log("debug", "chat_delivery_receipt_sent", {
+              id: attrs.id,
+              roomId,
+              toDeviceId: fromDeviceId,
+              mode: this.config.deliveryReceiptMode
+            });
+          });
+        }
+        try {
+          await receiptPromise;
+        } catch (error) {
+          receiptPromise = null;
+          throw error;
+        }
+      }
+    };
+    this.rememberMessageAuthor(roomId, emittedMessageId, originalAuthorAddress);
+    await this.emitValidatedMessage(message, delivery);
+    this.flushPendingRetraction(roomId, emittedMessageId, originalAuthorAddress);
     this.log("debug", "chat_message_received", {
       id: emittedMessageId,
       roomId,
@@ -843,23 +2593,34 @@ var LulaChatClient = class {
       messageType: metadata.messageType,
       hasAttachments: Boolean(attachments?.length)
     });
-    const receiptRequest = messageStanza.getChild?.("request", XMPP_RECEIPTS_NS);
-    if (!carbon && attrs.id && receiptRequest && fromDeviceId) {
-      await this.sendReceipt({ toDeviceId: fromDeviceId, roomId, messageId: attrs.id });
-    }
   }
   async sendReceipt(input) {
+    const xmpp = this.requireXmpp();
+    const receiptId = `rcpt-${generateMessageId()}`;
     const children = [
       (0, import_client.xml)("received", { xmlns: XMPP_RECEIPTS_NS, id: input.messageId })
     ];
     if (input.roomId) children.unshift((0, import_client.xml)("thread", {}, input.roomId));
-    await this.requireXmpp().send(
-      (0, import_client.xml)("message", {
-        to: input.toDeviceId,
-        type: "chat",
-        id: `rcpt-${Date.now()}`
-      }, ...children)
-    );
+    if (this.config.awaitServerAcknowledgement && xmpp.streamManagement.enabled !== true) {
+      throw new Error("chat_stream_management_unavailable");
+    }
+    const serverAckPromise = this.config.awaitServerAcknowledgement ? this.createServerAckWaiter(receiptId, [input.toDeviceId]) : null;
+    try {
+      await xmpp.send(
+        (0, import_client.xml)("message", {
+          to: input.toDeviceId,
+          type: "chat",
+          id: receiptId
+        }, ...children)
+      );
+      if (serverAckPromise) {
+        this.updateServerAckExpectedTargets(receiptId, [input.toDeviceId]);
+        await serverAckPromise;
+      }
+    } catch (error) {
+      this.cancelServerAckWaiter(receiptId);
+      throw error;
+    }
   }
   getEncryptionContext() {
     return {
@@ -919,7 +2680,7 @@ var LulaChatClient = class {
     if (!normalizedRoomId) throw new Error("chat_room_id_required");
     this.rememberRoomPeers(
       normalizedRoomId,
-      deriveFanoutDeviceIds(room)
+      deriveRoomDeviceIds(room)
     );
     return { ...room, roomId: normalizedRoomId };
   }
@@ -950,6 +2711,26 @@ var LulaChatClient = class {
       throw new Error(`chat_room_peer_unknown${suffix}`);
     }
     return targets;
+  }
+  getGroupRoomForTransport(roomId) {
+    const normalizedRoomId = roomId?.trim();
+    return normalizedRoomId ? this.groupRooms.get(normalizedRoomId) : void 0;
+  }
+  getGroupEncryptionRecipientJids(room) {
+    const occupantPrefix = `${normalizeBareDeviceId(room.mucJid).toLowerCase()}/`;
+    const activeOccupants = Array.from(this.mucOccupantRealJids.entries()).filter(([occupantJid]) => occupantJid.startsWith(occupantPrefix)).map(([, realJid]) => normalizeBareDeviceId(realJid)).filter(Boolean);
+    const recipients = Array.from(
+      new Set(
+        [...room.memberJids, ...activeOccupants].map((jid) => normalizeBareDeviceId(jid)).filter(Boolean)
+      )
+    );
+    this.log("debug", "chat_muc_encryption_recipients_resolved", {
+      roomId: room.roomId,
+      configuredCount: room.memberJids.length,
+      activeOccupantCount: activeOccupants.length,
+      recipientCount: recipients.length
+    });
+    return recipients;
   }
   getCachedRoomPeers(roomId) {
     return Array.from(this.roomPeers.get(roomId.trim()) ?? []);
@@ -985,14 +2766,15 @@ var LulaChatClient = class {
       targets.map(async (targetDeviceId) => {
         try {
           await send(targetDeviceId);
-          return { ok: true };
+          return { ok: true, targetDeviceId };
         } catch (error) {
           this.log("warn", "chat_target_send_failed", { targetDeviceId, error });
           return { ok: false, error };
         }
       })
     );
-    if (results.some((result) => result.ok)) return;
+    const successfulTargets = results.filter((result) => result.ok).map((result) => result.targetDeviceId);
+    if (successfulTargets.length) return successfulTargets;
     throw results.find((result) => !result.ok)?.error ?? new Error("chat_send_failed");
   }
   clearTypingAutoPause(roomId) {
@@ -1030,6 +2812,9 @@ var LulaChatClient = class {
         children: encrypted.children ?? []
       };
     }
+    if (this.config.requireEncryptedPayloads) {
+      throw new Error("chat_payload_encryption_required");
+    }
     this.log("debug", "chat_payload_encoded_plain", {
       messageType: input.metadata.messageType,
       hasAttachments: Boolean(input.attachments?.length)
@@ -1059,6 +2844,9 @@ var LulaChatClient = class {
         hasAttachments: Boolean(decrypted.attachments?.length)
       });
       return decrypted;
+    }
+    if (this.config.requireEncryptedPayloads) {
+      throw new Error("chat_payload_encryption_required");
     }
     const body = stanza.getChildText?.("body") ?? "";
     const encodedMetadata = stanza.getChild?.("lula", XMPP_CHAT_NS)?.getText?.();
@@ -1142,10 +2930,205 @@ var LulaChatClient = class {
     });
     return parseUploadSlotResponse(stanza);
   }
+  rememberMessageAuthor(roomId, messageId, authorAddress) {
+    const normalizedRoomId = roomId.trim();
+    const normalizedMessageId = messageId.trim();
+    const normalizedAuthor = normalizeTransportAddress(authorAddress) || normalizeBareDeviceId(authorAddress);
+    if (!normalizedRoomId || !normalizedMessageId || !normalizedAuthor) return;
+    let roomAuthors = this.messageAuthorsByRoom.get(normalizedRoomId);
+    if (!roomAuthors) {
+      roomAuthors = /* @__PURE__ */ new Map();
+      this.messageAuthorsByRoom.set(normalizedRoomId, roomAuthors);
+      while (this.messageAuthorsByRoom.size > MAX_RUNTIME_MESSAGE_AUTHOR_ROOMS) {
+        const oldestRoomId = this.messageAuthorsByRoom.keys().next().value;
+        if (!oldestRoomId) break;
+        this.messageAuthorsByRoom.delete(oldestRoomId);
+      }
+    }
+    roomAuthors.delete(normalizedMessageId);
+    roomAuthors.set(normalizedMessageId, normalizedAuthor);
+    while (roomAuthors.size > MAX_RUNTIME_MESSAGE_AUTHORS_PER_ROOM) {
+      const oldestMessageId = roomAuthors.keys().next().value;
+      if (!oldestMessageId) break;
+      roomAuthors.delete(oldestMessageId);
+    }
+  }
+  queuePendingRetraction(event) {
+    let pending = this.pendingRetractionsByRoom.get(event.roomId);
+    if (!pending) {
+      pending = /* @__PURE__ */ new Map();
+      this.pendingRetractionsByRoom.set(event.roomId, pending);
+      while (this.pendingRetractionsByRoom.size > MAX_PENDING_RETRACTION_ROOMS) {
+        const oldestRoomId = this.pendingRetractionsByRoom.keys().next().value;
+        if (!oldestRoomId) break;
+        this.pendingRetractionsByRoom.delete(oldestRoomId);
+      }
+    }
+    pending.delete(event.targetMessageId);
+    pending.set(event.targetMessageId, event);
+    while (pending.size > MAX_PENDING_RETRACTIONS_PER_ROOM) {
+      const oldestMessageId = pending.keys().next().value;
+      if (!oldestMessageId) break;
+      pending.delete(oldestMessageId);
+    }
+  }
+  emitVerifiedRetraction(event, originalAuthorAddress) {
+    if (!isRetractionAuthorized(event, originalAuthorAddress)) {
+      this.log("warn", "chat_message_retraction_rejected_author_mismatch", {
+        id: event.id,
+        targetMessageId: event.targetMessageId,
+        roomId: event.roomId,
+        retractionAuthor: event.fromFullAddress || event.fromDeviceId,
+        originalAuthor: originalAuthorAddress
+      });
+      return;
+    }
+    const original = this.editTargets.get(this.editTargetKey(event.roomId, event.targetMessageId));
+    if (original) original.metadata = { ...original.metadata, retracted: true };
+    this.emit(this.retractionListeners, event);
+    this.log("debug", "chat_message_retraction_received", {
+      id: event.id,
+      targetMessageId: event.targetMessageId,
+      roomId: event.roomId,
+      fromDeviceId: event.fromDeviceId
+    });
+  }
+  async processRetraction(event) {
+    let originalAuthor = this.messageAuthorsByRoom.get(event.roomId)?.get(event.targetMessageId);
+    if (!originalAuthor && this.config.resolveMessageAuthor) {
+      try {
+        originalAuthor = trimToUndefined(
+          await this.config.resolveMessageAuthor({
+            roomId: event.roomId,
+            messageId: event.targetMessageId
+          })
+        );
+      } catch (error) {
+        this.log("warn", "chat_message_retraction_author_lookup_failed", {
+          id: event.id,
+          targetMessageId: event.targetMessageId,
+          roomId: event.roomId,
+          error
+        });
+      }
+    }
+    if (!originalAuthor) {
+      this.queuePendingRetraction(event);
+      this.log("warn", "chat_message_retraction_queued_unknown_original_author", {
+        id: event.id,
+        targetMessageId: event.targetMessageId,
+        roomId: event.roomId
+      });
+      return;
+    }
+    this.rememberMessageAuthor(event.roomId, event.targetMessageId, originalAuthor);
+    this.emitVerifiedRetraction(event, originalAuthor);
+  }
+  flushPendingRetraction(roomId, messageId, originalAuthorAddress) {
+    const pending = this.pendingRetractionsByRoom.get(roomId);
+    const event = pending?.get(messageId);
+    if (!event) return;
+    pending?.delete(messageId);
+    if (pending?.size === 0) this.pendingRetractionsByRoom.delete(roomId);
+    this.emitVerifiedRetraction(event, originalAuthorAddress);
+  }
   emit(listeners, event) {
     for (const listener of Array.from(listeners)) {
       try {
         listener(event);
+      } catch (error) {
+        this.log("error", "chat_listener_error", { error });
+      }
+    }
+  }
+  editTargetKey(roomId, messageId) {
+    return JSON.stringify([roomId, messageId]);
+  }
+  rememberEditTarget(roomId, messageId, target) {
+    const key = this.editTargetKey(roomId, messageId);
+    if (!this.editTargets.has(key)) this.editTargets.set(key, target);
+    else if (this.editTargets.get(key).timestamp === 0 && target.timestamp > 0)
+      this.editTargets.get(key).timestamp = target.timestamp;
+    while (this.editTargets.size > 2e3)
+      this.editTargets.delete(this.editTargets.keys().next().value);
+  }
+  async resolveEditTarget(roomId, messageId) {
+    const persisted = await this.config.resolveMessageForEdit?.({ roomId, messageId });
+    if (this.config.resolveMessageForEdit) return persisted;
+    return this.editTargets.get(this.editTargetKey(roomId, messageId));
+  }
+  async emitValidatedMessage(message, delivery) {
+    const targetId = typeof message.metadata.replacesId === "string" ? message.metadata.replacesId.trim() : "";
+    if (message.metadata.edited === true && targetId) {
+      const original = await this.resolveEditTarget(message.roomId, targetId);
+      if (!original) {
+        this.pendingEdits.set(this.editTargetKey(message.roomId, message.id), {
+          message,
+          delivery
+        });
+        while (this.pendingEdits.size > 200)
+          this.pendingEdits.delete(this.pendingEdits.keys().next().value);
+        return;
+      }
+      const error = getMessageEditError(
+        original,
+        message.fromFullAddress || message.fromDeviceId,
+        message.timestamp
+      );
+      if (error || message.metadata.messageType !== "CHAT_MESSAGE" || message.attachments?.length || !message.body.trim()) {
+        this.log("warn", "chat_edit_rejected", {
+          id: message.id,
+          reason: error ?? "chat_edit_not_allowed"
+        });
+        await delivery.acknowledgeDelivered();
+        return;
+      }
+      this.emitMessage(message, delivery);
+      if (this.config.deliveryReceiptMode === "automatic") await delivery.acknowledgeDelivered();
+      return;
+    }
+    if (message.metadata.edited === true || targetId && message.metadata.edited) {
+      this.log("warn", "chat_edit_rejected", { id: message.id, reason: "chat_edit_not_allowed" });
+      await delivery.acknowledgeDelivered();
+      return;
+    }
+    delete message.metadata.replacesId;
+    const target = {
+      authorAddress: message.fromFullAddress || message.fromDeviceId,
+      timestamp: message.timestamp,
+      body: message.body,
+      hasAttachments: Boolean(message.attachments?.length),
+      metadata: message.metadata
+    };
+    this.rememberEditTarget(message.roomId, message.id, target);
+    if (message.metadata.originId)
+      this.rememberEditTarget(message.roomId, message.metadata.originId, target);
+    this.emitMessage(message, delivery);
+    if (this.config.deliveryReceiptMode === "automatic") await delivery.acknowledgeDelivered();
+    for (const [key, pending] of Array.from(this.pendingEdits)) {
+      if (pending.message.roomId !== message.roomId || ![message.id, message.metadata.originId].includes(
+        String(pending.message.metadata.replacesId)
+      ))
+        continue;
+      this.pendingEdits.delete(key);
+      const error = getMessageEditError(
+        target,
+        pending.message.fromFullAddress || pending.message.fromDeviceId,
+        pending.message.timestamp
+      );
+      if (!error && pending.message.metadata.messageType === "CHAT_MESSAGE" && !pending.message.attachments?.length && pending.message.body.trim()) {
+        this.emitMessage(pending.message, pending.delivery);
+        if (this.config.deliveryReceiptMode === "automatic")
+          await pending.delivery.acknowledgeDelivered();
+      } else {
+        await pending.delivery.acknowledgeDelivered();
+      }
+    }
+  }
+  emitMessage(message, delivery) {
+    for (const listener of Array.from(this.messageListeners)) {
+      try {
+        listener(message, delivery);
       } catch (error) {
         this.log("error", "chat_listener_error", { error });
       }
@@ -1164,16 +3147,34 @@ function createOmemoEncryption(options = {}) {
   let cachedState = null;
   let publishedBareJid = null;
   let identityPublishPromise = null;
+  const refreshAfterMs = Math.max(1e3, options.discoveryRefreshAfterMs ?? 3e4);
+  let discoveryLogger;
+  const discoveryStore = options.discoveryCache ?? createStoredOmemoDiscoveryCache(
+    storage,
+    stateKeyPrefix,
+    (error) => discoveryLogger?.warn?.("chat_omemo_cache_storage_failed", { error })
+  );
+  const discovery = createOmemoDiscoveryReader(
+    discoveryStore,
+    { refreshAfterMs, maxAgeMs: Math.max(refreshAfterMs, options.discoveryMaxAgeMs ?? 12e4) }
+  );
+  const subscriptions = /* @__PURE__ */ new Map();
+  const watchedPeers = /* @__PURE__ */ new Map();
+  let connectionEpoch = 0;
   const stateKey = (bareJid) => `${stateKeyPrefix}:${bareJid}`;
   const sendOmemoIq = async (context, input, operation) => {
+    const startedEpoch = connectionEpoch;
     let lastError;
     for (let attempt = 1; attempt <= OMEMO_IQ_MAX_ATTEMPTS; attempt += 1) {
+      if (startedEpoch !== connectionEpoch) throw new Error("xmpp_omemo_cache_reset");
       try {
         return await context.sendIq({
           ...input,
           timeoutMs: OMEMO_IQ_TIMEOUT_MS
         });
       } catch (error) {
+        if (startedEpoch !== connectionEpoch) throw new Error("xmpp_omemo_cache_reset");
+        if (error instanceof Error && error.message.startsWith("chat_iq_error:")) throw error;
         lastError = error;
         if (attempt === OMEMO_IQ_MAX_ATTEMPTS) break;
         context.logger?.warn?.("chat_omemo_iq_retry", {
@@ -1336,31 +3337,6 @@ function createOmemoEncryption(options = {}) {
           { xmlns: PUBSUB_NS },
           (0, import_client.xml)(
             "publish",
-            { node: OMEMO_DEVICELIST_NODE },
-            (0, import_client.xml)(
-              "item",
-              { id: "current" },
-              (0, import_client.xml)(
-                "list",
-                { xmlns: OMEMO_NS },
-                ...finalDeviceIds.map((deviceId) => (0, import_client.xml)("device", { id: String(deviceId) }))
-              )
-            )
-          ),
-          publishOptions
-        )
-      },
-      "publish-devices"
-    );
-    await sendOmemoIq(
-      context,
-      {
-        type: "set",
-        payload: (0, import_client.xml)(
-          "pubsub",
-          { xmlns: PUBSUB_NS },
-          (0, import_client.xml)(
-            "publish",
             { node: `${OMEMO_BUNDLE_NODE_PREFIX}${state.omemoDeviceId}` },
             (0, import_client.xml)(
               "item",
@@ -1377,6 +3353,31 @@ function createOmemoEncryption(options = {}) {
       },
       "publish-identity"
     );
+    await sendOmemoIq(
+      context,
+      {
+        type: "set",
+        payload: (0, import_client.xml)(
+          "pubsub",
+          { xmlns: PUBSUB_NS },
+          (0, import_client.xml)(
+            "publish",
+            { node: OMEMO_DEVICELIST_NODE },
+            (0, import_client.xml)(
+              "item",
+              { id: "current" },
+              (0, import_client.xml)(
+                "list",
+                { xmlns: OMEMO_NS },
+                ...finalDeviceIds.map((deviceId) => (0, import_client.xml)("device", { id: String(deviceId) }))
+              )
+            )
+          ),
+          publishOptions
+        )
+      },
+      "publish-devices"
+    );
     publishedBareJid = bareJid;
     context.logger?.debug?.("chat_omemo_identity_published", {
       bareJid,
@@ -1388,15 +3389,96 @@ function createOmemoEncryption(options = {}) {
     const bareJid = context.getBareDeviceId();
     if (!bareJid || publishedBareJid === bareJid) return Promise.resolve();
     if (identityPublishPromise) return identityPublishPromise;
-    identityPublishPromise = publishIdentity(context).catch((error) => {
+    const promise = publishIdentity(context).catch((error) => {
       context.logger?.warn?.("chat_omemo_identity_publish_failed", {
         bareJid,
         error
       });
     }).finally(() => {
-      identityPublishPromise = null;
+      if (identityPublishPromise === promise) identityPublishPromise = null;
     });
-    return identityPublishPromise;
+    identityPublishPromise = promise;
+    return promise;
+  };
+  const unsubscribe = (context, peer, node) => {
+    subscriptions.delete(JSON.stringify([peer, node]));
+    const subscriber = context.getDeviceId();
+    if (!subscriber) return;
+    void context.sendIq({
+      type: "set",
+      to: peer,
+      timeoutMs: OMEMO_IQ_TIMEOUT_MS,
+      payload: (0, import_client.xml)("pubsub", { xmlns: PUBSUB_NS }, (0, import_client.xml)("unsubscribe", { node, jid: subscriber }))
+    }).catch((error) => context.logger?.warn?.("chat_omemo_unsubscribe_failed", { peer, node, error }));
+  };
+  const subscribe = (context, peer, node) => {
+    const subscriber = context.getDeviceId();
+    if (!subscriber) return;
+    const subscriptionKey = JSON.stringify([peer, node]);
+    if (subscriptions.has(subscriptionKey)) return;
+    const promise = context.sendIq({
+      type: "set",
+      to: peer,
+      timeoutMs: OMEMO_IQ_TIMEOUT_MS,
+      payload: (0, import_client.xml)(
+        "pubsub",
+        { xmlns: PUBSUB_NS },
+        (0, import_client.xml)("subscribe", { node, jid: subscriber })
+      )
+    }).then(() => void 0).catch((error) => {
+      if (subscriptions.get(subscriptionKey)?.promise === promise) subscriptions.delete(subscriptionKey);
+      context.logger?.warn?.("chat_omemo_subscription_failed", { peer, node, error });
+    });
+    subscriptions.set(subscriptionKey, { peer, node, promise });
+  };
+  const fetchSnapshot = async (context, peer) => {
+    const startedEpoch = connectionEpoch;
+    discoveryLogger = context.logger;
+    watchedPeers.delete(peer);
+    watchedPeers.set(peer, true);
+    if (watchedPeers.size > 128) {
+      const retiredPeer = watchedPeers.keys().next().value;
+      watchedPeers.delete(retiredPeer);
+      discovery.invalidate(context.getBareDeviceId(), retiredPeer);
+      for (const subscription of subscriptions.values()) {
+        if (subscription.peer === retiredPeer) unsubscribe(context, retiredPeer, subscription.node);
+      }
+    }
+    subscribe(context, peer, OMEMO_DEVICELIST_NODE);
+    const deviceIds = await fetchDeviceIds(context, peer);
+    if (!deviceIds.length) throw new Error("xmpp_omemo_peer_device_not_found");
+    if (deviceIds.length > 128) throw new Error("xmpp_omemo_peer_device_limit");
+    const activeNodes = /* @__PURE__ */ new Set([OMEMO_DEVICELIST_NODE, ...deviceIds.map((id) => `${OMEMO_BUNDLE_NODE_PREFIX}${id}`)]);
+    for (const subscription of subscriptions.values()) {
+      if (subscription.peer === peer && !activeNodes.has(subscription.node)) unsubscribe(context, peer, subscription.node);
+    }
+    const state = await loadOrCreateState(context.getBareDeviceId());
+    const devices = [];
+    let nextIndex = 0;
+    const results = await Promise.all(
+      Array.from({ length: Math.min(4, deviceIds.length) }, async () => {
+        const found = [];
+        for (; ; ) {
+          const index = nextIndex++;
+          if (index >= deviceIds.length) return found;
+          const deviceId = deviceIds[index];
+          subscribe(context, peer, `${OMEMO_BUNDLE_NODE_PREFIX}${deviceId}`);
+          try {
+            const identityKey = peer === state.bareJid && deviceId === state.omemoDeviceId ? base64ToBytes(state.identityPublicKey) : await fetchIdentityKey(context, peer, deviceId);
+            if (identityKey.length !== 32) throw new Error("xmpp_omemo_peer_identity_key_invalid");
+            found.push({ deviceId, identityKey: bytesToBase64(identityKey) });
+          } catch (error) {
+            if (error instanceof Error && error.message === "xmpp_omemo_peer_identity_key_missing") continue;
+            throw error;
+          }
+        }
+      })
+    );
+    if (startedEpoch !== connectionEpoch) throw new Error("xmpp_omemo_cache_reset");
+    devices.push(...results.flat());
+    devices.sort((a, b) => a.deviceId - b.deviceId);
+    if (!devices.length) throw new Error("xmpp_omemo_peer_identity_key_missing");
+    return { fetchedAt: Date.now(), devices };
   };
   const establishPeerSessions = async (context, toDeviceId) => {
     const bareJid = context.getBareDeviceId();
@@ -1406,35 +3488,55 @@ function createOmemoEncryption(options = {}) {
     const state = await loadOrCreateState(bareJid);
     const ownPrivateKey = base64ToBytes(state.identityPrivateKey);
     const peerBareJid = normalizeBareDeviceId(toDeviceId);
-    const peerDeviceIds = await fetchDeviceIds(context, peerBareJid);
-    if (!peerDeviceIds.length) {
-      throw new Error("xmpp_omemo_peer_device_not_found");
-    }
-    const sessions = [];
-    for (const peerDeviceId of peerDeviceIds) {
-      try {
-        const peerPublicKey = await fetchIdentityKey(
-          context,
-          peerBareJid,
-          peerDeviceId
-        );
-        sessions.push({
-          peerDeviceId,
-          sharedSecret: import_ed25519.x25519.getSharedSecret(ownPrivateKey, peerPublicKey)
-        });
-      } catch {
-      }
-    }
-    if (!sessions.length) {
-      throw new Error("xmpp_omemo_peer_identity_key_missing");
-    }
-    return sessions;
+    const snapshot = await discovery.get(
+      bareJid,
+      peerBareJid,
+      () => fetchSnapshot(context, peerBareJid),
+      (error) => context.logger?.warn?.("chat_omemo_background_refresh_failed", { peer: peerBareJid, error })
+    );
+    return snapshot.devices.map(({ deviceId, identityKey }) => ({
+      peerDeviceId: deviceId,
+      sharedSecret: import_ed25519.x25519.getSharedSecret(ownPrivateKey, base64ToBytes(identityKey))
+    }));
   };
   return {
     onConnect: async (context) => {
       const bareJid = context.getBareDeviceId();
-      if (!bareJid || publishedBareJid === bareJid) return;
+      if (!bareJid) return;
+      connectionEpoch += 1;
+      discoveryLogger = context.logger;
+      discovery.reset();
+      subscriptions.clear();
+      watchedPeers.clear();
       await startIdentityPublish(context);
+      await discoveryStore.load?.(bareJid);
+      const peers = discoveryStore.peers?.(bareJid).slice(-8) ?? [];
+      const startedEpoch = connectionEpoch;
+      let nextPeer = 0;
+      void Promise.all(Array.from({ length: Math.min(2, peers.length) }, async () => {
+        for (; ; ) {
+          const peer = peers[nextPeer++];
+          if (!peer || startedEpoch !== connectionEpoch) return;
+          await discovery.refresh(bareJid, peer, () => fetchSnapshot(context, peer)).catch((error) => context.logger?.warn?.("chat_omemo_background_refresh_failed", { peer, error }));
+        }
+      }));
+    },
+    onDisconnect: () => {
+      connectionEpoch += 1;
+      identityPublishPromise = null;
+      discovery.reset();
+      subscriptions.clear();
+      watchedPeers.clear();
+    },
+    onStanza: (stanza, context) => {
+      const event = stanza.getChild?.("event", "http://jabber.org/protocol/pubsub#event");
+      const peer = normalizeBareDeviceId(stanza.attrs?.from);
+      const owner = context.getBareDeviceId();
+      if (!event || !peer || !owner) return;
+      const nodes = ["items", "delete", "purge"].flatMap((name) => event.getChildren?.(name) ?? []).map((child) => child.attrs?.node ?? "");
+      if (nodes.some((node) => node === OMEMO_DEVICELIST_NODE || node.startsWith(OMEMO_BUNDLE_NODE_PREFIX))) {
+        discovery.invalidate(owner, peer);
+      }
     },
     encrypt: async (input, context) => {
       const bareJid = context.getBareDeviceId();
@@ -1445,10 +3547,20 @@ function createOmemoEncryption(options = {}) {
         void startIdentityPublish(context);
       }
       const state = await loadOrCreateState(bareJid);
-      const recipientBareJid = normalizeBareDeviceId(input.toDeviceId);
-      const recipientSessions = await establishPeerSessions(context, recipientBareJid);
-      const senderSessions = recipientBareJid === bareJid ? [] : await establishPeerSessions(context, bareJid);
-      const sessions = [...recipientSessions, ...senderSessions];
+      const recipientBareJids = Array.from(
+        new Set(
+          (input.recipientJids?.length ? input.recipientJids : [input.toDeviceId]).map((address) => normalizeBareDeviceId(address)).filter(Boolean)
+        )
+      );
+      if (!recipientBareJids.length) {
+        throw new Error("xmpp_omemo_recipient_required");
+      }
+      const allRecipientJids = recipientBareJids.includes(bareJid) ? recipientBareJids : [...recipientBareJids, bareJid];
+      const sessions = (await Promise.all(
+        allRecipientJids.map(
+          (recipientBareJid) => establishPeerSessions(context, recipientBareJid)
+        )
+      )).flat();
       const iv = (0, import_utils.randomBytes)(12);
       const contentKey = (0, import_utils.randomBytes)(OMEMO_AES_KEY_BYTES);
       const plaintext = new TextEncoder().encode(
@@ -1594,8 +3706,16 @@ function normalizeConfig(config) {
     domain,
     resource,
     connectTimeoutMs: config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+    deliveryReceiptMode: config.deliveryReceiptMode ?? "automatic",
+    requireMessageCarbons: config.requireMessageCarbons ?? false,
+    requireStreamManagement: config.requireStreamManagement ?? false,
+    awaitServerAcknowledgement: config.awaitServerAcknowledgement ?? false,
+    requireEncryptedAttachments: config.requireEncryptedAttachments ?? false,
+    requireEncryptedPayloads: config.requireEncryptedPayloads ?? false,
     roomDirectory: config.roomDirectory,
     resolveRoomDeviceIds: config.resolveRoomDeviceIds,
+    resolveMessageAuthor: config.resolveMessageAuthor,
+    resolveMessageForEdit: config.resolveMessageForEdit,
     logger: config.logger,
     logLevel: normalizeLogLevel(config.logLevel, config.logger),
     encryption: config.encryption,
@@ -1644,7 +3764,9 @@ function extractDisplayName(metadata) {
 }
 function extractMessageType(metadata) {
   const rawType = firstString(metadata?.messageType, metadata?.type);
-  if (rawType === "CHAT_MESSAGE" || rawType === "FORM_SUBMISSION") return rawType;
+  if (rawType === "CHAT_MESSAGE" || rawType === "FORM_SUBMISSION" || rawType === CHAT_CONVERSATION_STATE_MESSAGE_TYPE || rawType === CHAT_EMERGENCY_MESSAGE_TYPE || rawType === CHAT_VOICE_MESSAGE_TYPE) {
+    return rawType;
+  }
   return void 0;
 }
 function normalizeMessageMetadata(metadata, fallbackType) {
@@ -1759,6 +3881,35 @@ function buildFormSubmissionMetadata(input) {
   });
   return metadata;
 }
+function parseConversationStateMessage(message) {
+  if (extractMessageType(message.metadata) !== CHAT_CONVERSATION_STATE_MESSAGE_TYPE) {
+    return null;
+  }
+  const conversationType = firstString(message.metadata.conversationType);
+  const state = firstString(message.metadata.conversationState);
+  if (conversationType !== "form_submission") return null;
+  if (state !== "open" && state !== "closed") return null;
+  const changedAt = normalizeIsoDate(firstString(message.metadata.conversationChangedAt)) ?? new Date(message.timestamp).toISOString();
+  const conversationId = firstString(message.metadata.conversationId);
+  return {
+    id: message.id,
+    fromUserId: message.fromUserId,
+    fromFullAddress: message.fromFullAddress,
+    fromDeviceId: message.fromDeviceId,
+    toDeviceId: message.toDeviceId,
+    roomId: message.roomId,
+    conversationType,
+    state,
+    ...conversationId ? { conversationId } : {},
+    changedAt,
+    timestamp: message.timestamp,
+    metadata: message.metadata,
+    raw: message.raw
+  };
+}
+function isConversationStateMessage(message) {
+  return Boolean(parseConversationStateMessage(message));
+}
 function collectTargetDeviceIds(input) {
   return normalizeTransportAddressList([
     input.toDeviceId,
@@ -1826,6 +3977,29 @@ function toChatTextMessage(message) {
     ...Object.keys(context).length > 0 ? { context } : {}
   };
 }
+function parseEmergencyMetadata(metadata) {
+  const emergencyType = firstString(metadata?.emergencyType);
+  const alertId = firstString(metadata?.emergencyAlertId);
+  const triggeredAt = normalizeIsoDate(firstString(metadata?.emergencyTriggeredAt));
+  if (emergencyType !== CHAT_EMERGENCY_TYPE_SOS || !alertId || !triggeredAt) {
+    return null;
+  }
+  return { emergencyType, alertId, triggeredAt };
+}
+function parseChatEmergencyMessage(message) {
+  const messageType = extractMessageType(message.metadata);
+  const emergency = parseEmergencyMetadata(message.metadata);
+  if (messageType !== CHAT_EMERGENCY_MESSAGE_TYPE || !emergency) {
+    return null;
+  }
+  return {
+    ...toChatTextMessage(message),
+    ...emergency
+  };
+}
+function isEmergencyMessage(message) {
+  return Boolean(parseChatEmergencyMessage(message));
+}
 function toChatAttachmentMessage(message) {
   const attachments = normalizeAttachmentPayload(message.attachments);
   if (!attachments?.length) {
@@ -1861,6 +4035,7 @@ function isFormSubmissionMessage(message) {
   return Boolean(parseFormSubmissionMessage(message));
 }
 function isAttachmentMessage(message) {
+  if (isFormSubmissionMessage(message)) return false;
   const attachments = normalizeAttachmentPayload(message.attachments);
   if (!attachments?.length) return false;
   if (message.metadata.attachment === true) return true;
@@ -1963,12 +4138,61 @@ function normalizeRequiredAttachment(value) {
   if (!attachment) throw new Error("chat_attachment_invalid");
   return attachment;
 }
+function normalizeAttachmentEncryption(value) {
+  if (!isRecord(value) || value.v !== 1 || value.alg !== "A256GCM") return null;
+  const keyB64 = firstString(value.keyB64);
+  const ivB64 = firstString(value.ivB64);
+  const plaintextSha256B64 = firstString(value.plaintextSha256B64);
+  const ciphertextSha256B64 = firstString(value.ciphertextSha256B64);
+  const plaintextSize = typeof value.plaintextSize === "number" && Number.isSafeInteger(value.plaintextSize) ? value.plaintextSize : -1;
+  const ciphertextSize = typeof value.ciphertextSize === "number" && Number.isSafeInteger(value.ciphertextSize) ? value.ciphertextSize : -1;
+  if (!keyB64 || !ivB64 || !plaintextSha256B64 || !ciphertextSha256B64 || plaintextSize < 0 || ciphertextSize <= plaintextSize) {
+    return null;
+  }
+  try {
+    if (base64ToBytes(keyB64).length !== 32 || base64ToBytes(ivB64).length !== 12 || base64ToBytes(plaintextSha256B64).length !== 32 || base64ToBytes(ciphertextSha256B64).length !== 32) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  return {
+    v: 1,
+    alg: "A256GCM",
+    keyB64,
+    ivB64,
+    plaintextSha256B64,
+    ciphertextSha256B64,
+    plaintextSize,
+    ciphertextSize
+  };
+}
+function normalizeAttachmentDownloadCapability(value) {
+  if (!isRecord(value) || value.v !== 1 || value.scheme !== "LulaAttachment") {
+    return null;
+  }
+  const authorization = firstString(value.authorization);
+  const expiresAt = firstString(value.expiresAt);
+  if (!authorization || !/^LulaAttachment\s+v1\.[A-Za-z0-9._-]+$/.test(authorization) || !expiresAt || !Number.isFinite(Date.parse(expiresAt))) {
+    return null;
+  }
+  return {
+    v: 1,
+    scheme: "LulaAttachment",
+    authorization,
+    expiresAt: new Date(Date.parse(expiresAt)).toISOString()
+  };
+}
 function normalizeAttachment(value) {
   if (!isRecord(value)) return null;
   const id = firstString(value.id, value.url, value.localUri, value.thumbnailUrl);
   if (!id) return null;
   const type = normalizeAttachmentType(value);
   const metadata = isRecord(value.metadata) ? value.metadata : void 0;
+  const encryption = normalizeAttachmentEncryption(value.encryption);
+  const downloadCapability = normalizeAttachmentDownloadCapability(
+    value.downloadCapability
+  );
   return removeUndefinedValues({
     id,
     type,
@@ -1980,7 +4204,9 @@ function normalizeAttachment(value) {
     localUri: firstString(value.localUri),
     width: typeof value.width === "number" && Number.isFinite(value.width) ? Math.max(0, Math.floor(value.width)) : void 0,
     height: typeof value.height === "number" && Number.isFinite(value.height) ? Math.max(0, Math.floor(value.height)) : void 0,
-    metadata
+    metadata,
+    encryption: encryption ?? void 0,
+    downloadCapability: downloadCapability ?? void 0
   });
 }
 function normalizeAttachmentType(value) {
@@ -2033,6 +4259,7 @@ async function withTimeout(promise, ms, errorCode) {
   }
 }
 async function safeStop(xmpp) {
+  xmpp.reconnect.stop();
   try {
     await xmpp.stop();
   } catch {
@@ -2049,20 +4276,62 @@ function parseStanzaError(stanza) {
     text: text ?? void 0
   };
 }
+var MIN_MESSAGE_TIMESTAMP_MS = Date.UTC(2e3, 0, 1);
+var MESSAGE_CLOCK_SKEW_MS = 5 * 60 * 1e3;
+function isServerMessageTimestamp(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= MIN_MESSAGE_TIMESTAMP_MS && value <= 864e13;
+}
+function parseServerMessageTimestamp(stanza, domain) {
+  const time = stanza.getChild?.("time", XMPP_MESSAGE_TIME_NS);
+  if (time?.attrs?.by?.toLowerCase() !== domain.toLowerCase()) return void 0;
+  const raw = time.attrs?.ms;
+  if (!raw || !/^\d+$/.test(raw)) return void 0;
+  const timestamp = Number(raw);
+  return isServerMessageTimestamp(timestamp) ? timestamp : void 0;
+}
+function parseTrustedDelayTimestamp(stanza, domain) {
+  const delay = stanza.getChild?.("delay", "urn:xmpp:delay");
+  const from = addressToString(delay?.attrs?.from)?.toLowerCase();
+  const trusted = domain.toLowerCase();
+  if (from !== trusted && from !== normalizeBareDeviceId(stanza.attrs?.to).toLowerCase() && !from?.endsWith(`@conference.${trusted}`)) return void 0;
+  return parseDelayTimestamp(stanza);
+}
+function isPlausibleMessageTimestamp(value, referenceTime = Date.now()) {
+  return Number.isSafeInteger(value) && value >= MIN_MESSAGE_TIMESTAMP_MS && value <= referenceTime + MESSAGE_CLOCK_SKEW_MS;
+}
 function parseDelayTimestamp(stanza) {
   const delay = stanza.getChild?.("delay", "urn:xmpp:delay");
   const stamp = delay?.attrs?.stamp;
-  if (!stamp) return void 0;
+  if (!stamp || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(stamp)) return void 0;
   const parsed = Date.parse(stamp);
-  return Number.isFinite(parsed) ? parsed : void 0;
+  return isServerMessageTimestamp(parsed) ? parsed : void 0;
 }
-function parseMetadataTimestamp(metadata) {
+function parseChatServerEvent(stanza, xmppDomain) {
+  const element = stanza.getChild?.("event", XMPP_SERVER_EVENT_NS);
+  if (!element) return null;
+  const from = addressToString(stanza.attrs?.from)?.trim().toLowerCase();
+  const domain = normalizeXmppDomain(xmppDomain)?.toLowerCase();
+  if (!from || !domain || from !== domain) return null;
+  const id = trimToUndefined(stanza.attrs?.id);
+  const type = trimToUndefined(element.attrs?.type);
+  const encoded = trimToUndefined(element.getText?.());
+  const data = encoded ? decodeJsonBase64(encoded) : null;
+  if (!id || !type || !isRecord(data)) return null;
+  return {
+    id,
+    type,
+    data,
+    timestamp: parseServerMessageTimestamp(stanza, domain) ?? parseDelayTimestamp(stanza) ?? Date.now(),
+    raw: stanza
+  };
+}
+function parseMetadataTimestamp(metadata, referenceTime = Date.now()) {
   const sentAtMs = metadata?.sentAtMs;
-  if (typeof sentAtMs === "number" && Number.isFinite(sentAtMs)) return sentAtMs;
+  if (typeof sentAtMs === "number" && isPlausibleMessageTimestamp(sentAtMs, referenceTime)) return sentAtMs;
   const createdAt = metadata?.createdAt;
-  if (typeof createdAt !== "string") return void 0;
+  if (typeof createdAt !== "string" || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(createdAt)) return void 0;
   const parsed = Date.parse(createdAt);
-  return Number.isFinite(parsed) ? parsed : void 0;
+  return isPlausibleMessageTimestamp(parsed, referenceTime) ? parsed : void 0;
 }
 function generateMessageId() {
   return `msg-${Date.now()}-${createRuntimeIdSuffix()}`;
@@ -2149,6 +4418,12 @@ function trimToUndefined(value) {
   const trimmed = value?.trim();
   return trimmed ? trimmed : void 0;
 }
+function normalizeIsoDate(value) {
+  const normalized = trimToUndefined(value);
+  if (!normalized) return void 0;
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : void 0;
+}
 function normalizeResourceSegment(value) {
   const resource = value.trim().replace(/\s+/g, "-").replace(/\//g, "-");
   if (!resource) throw new Error("chat_resource_invalid");
@@ -2191,7 +4466,7 @@ function normalizeChatRoomResponse(response, options = {}) {
     raw: response
   };
 }
-function deriveFanoutDeviceIds(room) {
+function deriveRoomDeviceIds(room) {
   return normalizeTransportAddressList([...room.peerDeviceIds ?? [], ...room.ownDeviceIds ?? []]);
 }
 function unwrapRoomRecord(response) {
@@ -2515,15 +4790,35 @@ function decodeJsonBase64(value) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  CHAT_ATTACHMENT_CAPABILITY_EXPIRES_HEADER,
+  CHAT_ATTACHMENT_CAPABILITY_HEADER,
+  CHAT_CONVERSATION_STATE_MESSAGE_TYPE,
+  CHAT_EMERGENCY_MESSAGE_TYPE,
+  CHAT_EMERGENCY_TYPE_SOS,
+  CHAT_MESSAGE_EDIT_WINDOW_MS,
+  CHAT_REACTION_EMOJIS,
+  CHAT_REACTION_INTERACTION_TYPE,
+  CHAT_VOICE_MESSAGE_TYPE,
+  CHAT_VOICE_SPEC,
+  XMPP_EMERGENCY_NS,
+  XMPP_MESSAGE_TIME_NS,
+  XMPP_SERVER_EVENT_NS,
+  buildChatAttachmentDownloadRequest,
+  buildChatInteractionTimeline,
   buildChatMessageMetadata,
   buildFormSubmissionMetadata,
+  chatAttachmentDownloadCapabilityFromHeaders,
   createChatClient,
   createDeviceId,
+  createInMemoryOmemoDiscoveryCache,
   createIndexDbStorageBackend,
   createMemoryStorageBackend,
   createMongoDbStorageBackend,
   createOmemoEncryption,
   createRoomDirectory,
+  decryptChatAttachmentBytes,
+  downloadChatAttachmentWithFetch,
+  encryptChatAttachmentBytes,
   extractDisplayName,
   extractProviderDirectMessageRoomId,
   extractSubmissionId,
@@ -2531,7 +4826,27 @@ function decodeJsonBase64(value) {
   getChatAddress,
   getChatDeviceId,
   getChatUserId,
+  getChatVoiceDurationMs,
+  getChatVoiceRecorderExpoOptions,
+  getChatVoiceRecorderWebOptions,
+  getMessageEditError,
+  getMessageInteractionId,
+  hasChatAttachmentDownloadCapability,
   init,
-  storageBackends
+  isChatAudioAttachment,
+  isChatReactionControlMessage,
+  isChatReactionEmoji,
+  isEmergencyMessage,
+  isEncryptedChatAttachment,
+  isMessageEditWithinWindow,
+  isRetractionAuthorized,
+  normalizeInteractionActorId,
+  parseChatEmergencyMessage,
+  parseChatReactionEvent,
+  parseChatReplyReference,
+  parseChatServerEvent,
+  parseConversationStateMessage,
+  storageBackends,
+  uploadChatAttachmentWithFetch
 });
 //# sourceMappingURL=index.cjs.map
