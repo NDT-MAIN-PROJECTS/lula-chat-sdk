@@ -756,24 +756,36 @@ Message Carbon delivery.
 
 ## Message timestamps
 
-Use `ChatMessage.timestamp` for display and ordering. It is resolved Unix epoch
-milliseconds; incoming `metadata.sentAtMs` and `metadata.createdAt` remain the
-sender's original values.
+Use `ChatMessage.timestamp` for display and ordering. The server assigns this
+Unix time in milliseconds on first acceptance. Client `metadata.sentAtMs` and
+`metadata.createdAt` have no authority over received message time.
 
-The receiver prefers a valid sender `sentAtMs`, then a valid legacy `createdAt`.
-Numeric timestamps must be safe integer milliseconds from 2000 onward. String
-dates must include a timezone. Sender times may be at most five minutes ahead
-of receipt time or, for delayed delivery, the earlier archive time. Invalid
-sender times fall back to the XMPP delay, then local receipt time. Forwarded
-Message Carbons preserve the delay on their forwarding wrapper. Delay dates
-are also validated against local receipt time.
+The wire stamp is `<time xmlns="urn:lulafi:message-time:1" by="example.test"
+ms="1791506160123"/>`. The server replaces client stamps at authenticated ingress.
+It retains one time per account, room, and stable message ID across fanout,
+retries, and restarts. MAM replay retains this stamp. Legacy archive rows use
+their server archive time. Forwarded Message Carbons retain their wrapper delay.
+The SDK checks a carbon's sender against the current account's bare JID.
 
-This preserves legitimate original send times for queued and replayed messages
-and applies regardless of which XMPP client sent them. It cannot identify
-plausible but deliberately backdated sender times: guaranteeing an authoritative
-timeline requires server-controlled timestamps. Existing app caches are not
-rewritten. Corrections require a valid original correction creation time;
-fallback receipt time cannot make an invalid correction eligible for editing.
+The SDK copies the trusted time to `metadata.serverTimestampMs`. Sender metadata
+cannot override that field. Server times do not depend on the receiving device's
+clock. A received message without trusted time raises
+`chat_message_server_timestamp_missing` and stays out of the message stream.
+
+The sending device receives an `onServerEvent` event with type
+`message_timestamp`. Its `data` contains `messageId`, `roomId`, and `timestamp`.
+Replace the pending message's local time with this value. Keep its body, delivery
+status, edits, attachments, and deletion state. These events come from the bare
+server domain and use MAM storage for reconnect delivery.
+
+Pending local time remains temporary. Existing caches receive corrections on
+trusted replay. This change does not rewrite all historical client records.
+
+Deploy `mod_lula_message_time` on ejabberd first. It stamps API notices at routing
+too. Then publish this SDK change and update consumer dependencies. Mobile currently
+uses a native crypto patch on SDK 0.1.39. Retain that patch during the upgrade.
+Desktop currently pins SDK 0.1.38. The prepared client changes need this SDK
+release for authoritative incoming time.
 
 ## Editing messages
 
@@ -814,8 +826,8 @@ resolveMessageForEdit: async ({ roomId, messageId }) => {
 
 Without a resolver the SDK uses a bounded runtime cache of originals. A supplied
 resolver is authoritative, including missing or deleted originals. Incoming
-corrections are checked against their creation timestamp rather than the time
-of receipt, so valid edits can arrive later on offline devices. Unknown originals
+corrections are checked against their server acceptance time, so valid edits
+can arrive later on offline devices. Unknown originals
 are deferred in a bounded queue; in manual receipt mode they are not acknowledged
 until the application persists the validated correction.
 
@@ -831,8 +843,9 @@ original edit `metadata.sentAtMs` and locally persisted `serverAcceptedAt` to
 from incoming wire metadata. Receiving clients still validate the edit's original
 creation time and authorship.
 
-These are client policy checks. Sender timestamps are not a server-trusted clock;
-strict enforcement against modified clients requires a separate server protocol.
-The current protocol remains encrypted and does not require ejabberd changes.
+Receiving clients check the edit window using server acceptance times. A modified
+sender cannot reopen an expired window with a backdated metadata timestamp.
+The server retains the same time for a retry of an accepted edit ID. Message
+content and correction metadata remain encrypted.
 
 `npm run build` runs type checks, builds the package, and runs the Node tests.

@@ -880,7 +880,7 @@ export type ChatMessage = {
   toDeviceId: DeviceId;
   roomId: string;
   body: string;
-  /** Resolved Unix epoch milliseconds for display and ordering; raw metadata is preserved separately. */
+  /** Server acceptance time in Unix epoch milliseconds. Use for display and ordering. */
   timestamp: number;
   metadata: ChatMessageMetadata;
   attachments?: ChatAttachment[];
@@ -1593,6 +1593,7 @@ type CarbonForwardedMessage = {
 };
 
 const XMPP_CHAT_NS = "urn:lula:defy:chat:1";
+export const XMPP_MESSAGE_TIME_NS = "urn:lulafi:message-time:1";
 const XMPP_RECEIPTS_NS = "urn:xmpp:receipts";
 const XMPP_CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0";
 const XMPP_CHATSTATES_NS = "http://jabber.org/protocol/chatstates";
@@ -1844,6 +1845,7 @@ class LulaChatClient implements ChatClient {
   private readonly groupJoinRetryAttempts = new Map<string, number>();
 
   private readonly serverAckWaiters = new Map<string, ServerAckWaiter>();
+  private readonly serverMessageTimestamps = new Map<string, number>();
 
   private onlineDeviceId?: DeviceId;
 
@@ -2435,7 +2437,7 @@ class LulaChatClient implements ChatClient {
       originalForEdit = await this.resolveEditTarget(input.roomId, editTargetId);
       const error = getMessageEditError(originalForEdit, this.getDeviceId() ?? "");
       if (error && !(error === "chat_edit_expired" && editServerAcceptedAt !== undefined)) throw new Error(error);
-      // A receiver uses this immutable event creation time, never its receipt time.
+      // Keep the client creation time for outbox retries. Receivers use server time.
       const editTimestamp = parseMetadataTimestamp(metadata) ?? Date.now();
       const timestampError = getMessageEditError(originalForEdit, this.getDeviceId() ?? "", editTimestamp);
       if (timestampError) throw new Error(timestampError);
@@ -2563,7 +2565,8 @@ class LulaChatClient implements ChatClient {
     if (roomId) {
       this.rememberMessageAuthor(roomId, id, this.getDeviceId());
       if (!isEdit) this.rememberEditTarget(roomId, id, {
-        authorAddress: this.getDeviceId() ?? "", timestamp: parseMetadataTimestamp(metadata)!,
+        authorAddress: this.getDeviceId() ?? "",
+        timestamp: this.serverMessageTimestamps.get(this.editTargetKey(roomId, id)) ?? 0,
         body: messageBody, hasAttachments: Boolean(attachments?.length), metadata,
       });
     }
@@ -3272,6 +3275,9 @@ class LulaChatClient implements ChatClient {
     const sent = stanza.getChild?.("sent", XMPP_CARBONS_NS);
     const received = stanza.getChild?.("received", XMPP_CARBONS_NS);
     const carbon = sent ?? received;
+    // A forwarded copy is trusted only from our own bare account.
+    if (carbon && addressToString(stanza.attrs?.from)?.toLowerCase() !==
+        normalizeBareDeviceId(this.getDeviceId()).toLowerCase()) return null;
     const direction = sent ? "sent" : received ? "received" : undefined;
     const forwarded = carbon?.getChild?.("forwarded", XMPP_FORWARD_NS);
     const message =
@@ -3575,6 +3581,17 @@ class LulaChatClient implements ChatClient {
     if (stanza.getChild?.("event", XMPP_SERVER_EVENT_NS)) {
       const serverEvent = parseChatServerEvent(stanza, this.config.domain);
       if (serverEvent) {
+        if (serverEvent.type === "message_timestamp") {
+          const { messageId, roomId, timestamp } = serverEvent.data;
+          if (typeof messageId !== "string" || typeof roomId !== "string" ||
+              !isServerMessageTimestamp(timestamp)) return;
+          const key = this.editTargetKey(roomId, messageId);
+          this.serverMessageTimestamps.set(key, timestamp);
+          const target = this.editTargets.get(key);
+          if (target) target.timestamp = timestamp;
+          if (this.serverMessageTimestamps.size > 2000)
+            this.serverMessageTimestamps.delete(this.serverMessageTimestamps.keys().next().value!);
+        }
         this.log("debug", "chat_server_event_received", {
           id: serverEvent.id,
           type: serverEvent.type,
@@ -3590,11 +3607,13 @@ class LulaChatClient implements ChatClient {
     }
 
     const carbon = this.unwrapCarbonMessage(stanza);
+    if (!carbon && (stanza.getChild?.("sent", XMPP_CARBONS_NS) ||
+                    stanza.getChild?.("received", XMPP_CARBONS_NS))) return;
     const messageStanza = carbon?.message ?? stanza;
-    const receivedAtMs = Date.now();
     // XEP-0297 puts the replay delay beside the inner message. Preserve it
     // before unwrapping so older linked-device copies retain their archive time.
-    const transportTimestamp = carbon?.timestamp ?? parseDelayTimestamp(messageStanza);
+    const transportTimestamp = parseServerMessageTimestamp(messageStanza, this.config.domain) ??
+      carbon?.timestamp ?? parseTrustedDelayTimestamp(messageStanza, this.config.domain);
     const attrs = messageStanza.attrs ?? {};
     const groupInvitation = this.parseGroupInvitation(messageStanza);
     if (groupInvitation) {
@@ -3717,6 +3736,7 @@ class LulaChatClient implements ChatClient {
 
     const retraction = messageStanza.getChild?.("retract", XMPP_RETRACT_NS);
     if (retraction) {
+      if (transportTimestamp === undefined) return;
       const targetMessageId = trimToUndefined(retraction.attrs?.id);
       if (targetMessageId && roomId && toDeviceId) {
         const eventId = attrs.id || generateMessageId();
@@ -3728,7 +3748,7 @@ class LulaChatClient implements ChatClient {
           fromDeviceId,
           toDeviceId,
           roomId,
-          timestamp: transportTimestamp ?? receivedAtMs,
+          timestamp: transportTimestamp,
           raw: messageStanza,
         });
       } else {
@@ -3767,6 +3787,7 @@ class LulaChatClient implements ChatClient {
       });
     }
     if (gone) {
+      if (transportTimestamp === undefined) return;
       if (roomId) {
         const eventId = attrs.id || generateMessageId();
         this.emit(this.threadGoneListeners, {
@@ -3776,7 +3797,7 @@ class LulaChatClient implements ChatClient {
           fromDeviceId,
           toDeviceId,
           roomId,
-          timestamp: transportTimestamp ?? receivedAtMs,
+          timestamp: transportTimestamp,
           raw: messageStanza,
         });
         this.log("debug", "chat_thread_gone_received", {
@@ -3879,9 +3900,15 @@ class LulaChatClient implements ChatClient {
       inferMessageType(decodedMetadata, body),
     );
     const emittedMessageId = attrs.id || generateMessageId();
-    const senderTimestamp = parseMetadataTimestamp(
-      metadata, Math.min(receivedAtMs, transportTimestamp ?? receivedAtMs),
-    );
+    if (transportTimestamp === undefined) {
+      this.log("warn", "chat_message_server_timestamp_missing", { id: emittedMessageId, roomId });
+      this.emit(this.errorListeners, {
+        id: emittedMessageId, roomId, fromDeviceId,
+        error: new Error("chat_message_server_timestamp_missing"), raw: messageStanza,
+      });
+      return;
+    }
+    metadata.serverTimestampMs = transportTimestamp;
     const message: ChatMessage = {
       id: emittedMessageId,
       fromUserId,
@@ -3890,9 +3917,7 @@ class LulaChatClient implements ChatClient {
       toDeviceId,
       roomId,
       body,
-      // Preserve genuine original send times across queued/replayed delivery,
-      // but reject invalid units and times ahead of receipt/archive time.
-      timestamp: senderTimestamp ?? transportTimestamp ?? receivedAtMs,
+      timestamp: transportTimestamp,
       metadata,
       ...(attachments?.length ? { attachments } : {}),
       raw: messageStanza,
@@ -3931,13 +3956,6 @@ class LulaChatClient implements ChatClient {
         }
       },
     };
-    // An edit needs its original creation time. Substituting receipt/archive
-    // time could turn an invalid correction into an allowed one.
-    if (metadata.edited === true && senderTimestamp === undefined) {
-      this.log("warn", "chat_edit_rejected", { id: emittedMessageId, reason: "chat_edit_invalid_timestamp" });
-      await delivery.acknowledgeDelivered();
-      return;
-    }
     this.rememberMessageAuthor(roomId, emittedMessageId, originalAuthorAddress);
     await this.emitValidatedMessage(message, delivery);
     this.flushPendingRetraction(roomId, emittedMessageId, originalAuthorAddress);
@@ -4518,6 +4536,8 @@ class LulaChatClient implements ChatClient {
     const key = this.editTargetKey(roomId, messageId);
     // A replay of the original must never reset its timestamp or undo a tombstone.
     if (!this.editTargets.has(key)) this.editTargets.set(key, target);
+    else if (this.editTargets.get(key)!.timestamp === 0 && target.timestamp > 0)
+      this.editTargets.get(key)!.timestamp = target.timestamp;
     while (this.editTargets.size > 2000)
       this.editTargets.delete(this.editTargets.keys().next().value!);
   }
@@ -6140,6 +6160,29 @@ function parseStanzaError(stanza: XmppElementLike): Pick<ChatErrorEvent, "condit
 const MIN_MESSAGE_TIMESTAMP_MS = Date.UTC(2000, 0, 1);
 const MESSAGE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
+function isServerMessageTimestamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) &&
+    value >= MIN_MESSAGE_TIMESTAMP_MS && value <= 8.64e15;
+}
+
+function parseServerMessageTimestamp(stanza: XmppElementLike, domain: string): number | undefined {
+  const time = stanza.getChild?.("time", XMPP_MESSAGE_TIME_NS);
+  if (time?.attrs?.by?.toLowerCase() !== domain.toLowerCase()) return undefined;
+  const raw = time.attrs?.ms;
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  const timestamp = Number(raw);
+  return isServerMessageTimestamp(timestamp) ? timestamp : undefined;
+}
+
+function parseTrustedDelayTimestamp(stanza: XmppElementLike, domain: string): number | undefined {
+  const delay = stanza.getChild?.("delay", "urn:xmpp:delay");
+  const from = addressToString(delay?.attrs?.from)?.toLowerCase();
+  const trusted = domain.toLowerCase();
+  if (from !== trusted && from !== normalizeBareDeviceId(stanza.attrs?.to).toLowerCase() &&
+      !from?.endsWith(`@conference.${trusted}`)) return undefined;
+  return parseDelayTimestamp(stanza);
+}
+
 function isPlausibleMessageTimestamp(value: number, referenceTime = Date.now()): boolean {
   return Number.isSafeInteger(value)
     && value >= MIN_MESSAGE_TIMESTAMP_MS
@@ -6151,7 +6194,7 @@ function parseDelayTimestamp(stanza: XmppElementLike): number | undefined {
   const stamp = delay?.attrs?.stamp;
   if (!stamp || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(stamp)) return undefined;
   const parsed = Date.parse(stamp);
-  return isPlausibleMessageTimestamp(parsed) ? parsed : undefined;
+  return isServerMessageTimestamp(parsed) ? parsed : undefined;
 }
 
 /**
@@ -6181,7 +6224,7 @@ export function parseChatServerEvent(
     id,
     type,
     data,
-    timestamp: parseDelayTimestamp(stanza) ?? Date.now(),
+    timestamp: parseServerMessageTimestamp(stanza, domain) ?? parseDelayTimestamp(stanza) ?? Date.now(),
     raw: stanza,
   };
 }
