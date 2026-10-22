@@ -849,3 +849,20 @@ The server retains the same time for a retry of an accepted edit ID. Message
 content and correction metadata remain encrypted.
 
 `npm run build` runs type checks, builds the package, and runs the Node tests.
+# Service accounts and guest submissions
+
+`ChatClientBaseConfig.accountJid` accepts an explicit service-account bare JID
+on the configured XMPP domain. It leaves ordinary app-user addresses unchanged.
+The core API uses this option for `no-reply@<domain>`.
+
+`sendFormSubmission` accepts a typed `submitter` value. Guest submissions use
+`{ kind: "guest", guestSessionId: "<random UUID>", identityVerification: "none" }`.
+The SDK carries this marker inside the encrypted form metadata and removes
+registered-user identity fields from guest metadata. The payload keeps the
+same `readable` and `raw` maps used by mobile.
+
+The account must authenticate with server-issued credentials. The marker does
+not grant access or prove the submitter's identity. The server must enforce
+public form access and the outbound-only account policy. SDK configuration
+does not reject incoming messages at the server.
+

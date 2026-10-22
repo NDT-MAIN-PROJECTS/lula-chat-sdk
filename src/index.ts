@@ -754,6 +754,8 @@ function normalizeVoiceAttachmentName(name?: string): string {
 }
 
 export type ChatClientBaseConfig = {
+  /** Explicit service-account bare JID. Ordinary app users keep the i.<user> address. */
+  accountJid?: string;
   /** API key for app access to the chat service. */
   apiKey: string;
 
@@ -1147,6 +1149,8 @@ export type ChatFormSubmissionField = {
 };
 
 export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"> & {
+  /** Describes the submitter, independently of the authenticated transport sender. */
+  submitter?: ChatFormSubmitter;
   payload: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   formId?: string;
@@ -1159,6 +1163,10 @@ export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"
   submittedAt?: string;
   pretty?: boolean;
 };
+
+export type ChatFormSubmitter =
+  | { kind: "user"; userId: string }
+  | { kind: "guest"; guestSessionId: string; identityVerification: "none" };
 
 export type ChatFormSubmissionMessage = ChatMessage & {
   answers: Record<string, string>;
@@ -5341,8 +5349,12 @@ function normalizeConfig(config: ChatClientConfig): NormalizedConfig {
   if (!localDeviceId) throw new Error("chat_device_id_required");
 
   const resource = normalizeResourceSegment(localDeviceId);
-  const username = buildXmppUserLocalpart(userId);
-  const deviceId = buildXmppUserResourceAddress(userId, domain, resource);
+  const accountJid = trimToUndefined(config.accountJid)?.toLowerCase();
+  if (accountJid && (!/^[^@/\s]+@[^@/\s]+$/.test(accountJid) || !accountJid.endsWith(`@${domain}`))) {
+    throw new Error("chat_service_account_jid_invalid");
+  }
+  const username = accountJid ? accountJid.split("@")[0] : buildXmppUserLocalpart(userId);
+  const deviceId = accountJid ? `${accountJid}/${resource}` : buildXmppUserResourceAddress(userId, domain, resource);
 
   return {
     service: buildXmppWebSocketUrl(domain, config.xmppWebSocketPath),
@@ -5562,9 +5574,21 @@ export function buildFormSubmissionMetadata(
     | "submissionRoomId"
     | "correlationId"
     | "submittedAt"
+    | "submitter"
   > & { displayName?: string },
 ): ChatMessageMetadata {
   const metadata = normalizeMessageMetadata(input.metadata, "FORM_SUBMISSION");
+  if (input.submitter) {
+    if (input.submitter.kind === "guest" && !input.submitter.guestSessionId?.trim()) {
+      throw new Error("chat_guest_session_required");
+    }
+    metadata.submitter = input.submitter;
+    if (input.submitter.kind === "guest") {
+      metadata.guestSubmission = true;
+      delete metadata.userPk;
+      metadata.userGroups = null;
+    }
+  }
   const providerDirectMessageRoomId = firstString(
     input.providerDirectMessageRoomId,
     extractProviderDirectMessageRoomId(metadata),

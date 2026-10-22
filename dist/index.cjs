@@ -3690,8 +3690,12 @@ function normalizeConfig(config) {
   const localDeviceId = normalizeDeviceIdSegment(config.deviceId);
   if (!localDeviceId) throw new Error("chat_device_id_required");
   const resource = normalizeResourceSegment(localDeviceId);
-  const username = buildXmppUserLocalpart(userId);
-  const deviceId = buildXmppUserResourceAddress(userId, domain, resource);
+  const accountJid = trimToUndefined(config.accountJid)?.toLowerCase();
+  if (accountJid && (!/^[^@/\s]+@[^@/\s]+$/.test(accountJid) || !accountJid.endsWith(`@${domain}`))) {
+    throw new Error("chat_service_account_jid_invalid");
+  }
+  const username = accountJid ? accountJid.split("@")[0] : buildXmppUserLocalpart(userId);
+  const deviceId = accountJid ? `${accountJid}/${resource}` : buildXmppUserResourceAddress(userId, domain, resource);
   return {
     service: buildXmppWebSocketUrl(domain, config.xmppWebSocketPath),
     uploadService: trimToUndefined(config.xmppUploadService) ?? `upload.${domain}`,
@@ -3838,6 +3842,17 @@ function buildChatMessageMetadata(input) {
 }
 function buildFormSubmissionMetadata(input) {
   const metadata = normalizeMessageMetadata(input.metadata, "FORM_SUBMISSION");
+  if (input.submitter) {
+    if (input.submitter.kind === "guest" && !input.submitter.guestSessionId?.trim()) {
+      throw new Error("chat_guest_session_required");
+    }
+    metadata.submitter = input.submitter;
+    if (input.submitter.kind === "guest") {
+      metadata.guestSubmission = true;
+      delete metadata.userPk;
+      metadata.userGroups = null;
+    }
+  }
   const providerDirectMessageRoomId = firstString(
     input.providerDirectMessageRoomId,
     extractProviderDirectMessageRoomId(metadata)

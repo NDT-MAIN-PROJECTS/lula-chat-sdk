@@ -357,6 +357,8 @@ export declare function isChatAudioAttachment(attachment: {
  */
 export declare function getChatVoiceDurationMs(metadata?: Record<string, unknown>): number | undefined;
 export type ChatClientBaseConfig = {
+    /** Explicit service-account bare JID. Ordinary app users keep the i.<user> address. */
+    accountJid?: string;
     /** API key for app access to the chat service. */
     apiKey: string;
     /** WebSocket path on the chat domain, or a full ws(s) URL. Defaults to "/chat/websocket". */
@@ -575,6 +577,8 @@ export type ChatFormSubmissionField = {
     required: boolean;
 };
 export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"> & {
+    /** Describes the submitter, independently of the authenticated transport sender. */
+    submitter?: ChatFormSubmitter;
     payload: Record<string, unknown>;
     metadata?: Record<string, unknown>;
     formId?: string;
@@ -586,6 +590,14 @@ export type ChatFormSubmissionInput = Omit<ChatMessageInput, "body" | "metadata"
     correlationId: string;
     submittedAt?: string;
     pretty?: boolean;
+};
+export type ChatFormSubmitter = {
+    kind: "user";
+    userId: string;
+} | {
+    kind: "guest";
+    guestSessionId: string;
+    identityVerification: "none";
 };
 export type ChatFormSubmissionMessage = ChatMessage & {
     answers: Record<string, string>;
@@ -929,7 +941,7 @@ export declare function buildChatMessageMetadata(input: {
     context?: ChatMessageContext;
     displayName?: string;
 }): ChatMessageMetadata;
-export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerDirectMessageRoomId" | "submissionRoomId" | "correlationId" | "submittedAt"> & {
+export declare function buildFormSubmissionMetadata(input: Pick<ChatFormSubmissionInput, "roomId" | "metadata" | "formId" | "providerUserId" | "recordId" | "formVersion" | "providerDirectMessageRoomId" | "submissionRoomId" | "correlationId" | "submittedAt" | "submitter"> & {
     displayName?: string;
 }): ChatMessageMetadata;
 export declare function parseConversationStateMessage(message: ChatMessage): ChatConversationStateEvent | null;
