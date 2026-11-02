@@ -1,6 +1,6 @@
 {
   "name": "@hubnet-systems/chat-sdk",
-  "version": "0.1.42",
+  "version": "0.1.43-mucsub.0",
   "description": "Typed XMPP chat client for apps & services.",
   "type": "module",
   "main": "./dist/index.cjs",

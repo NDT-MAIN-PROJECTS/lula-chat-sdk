@@ -1425,6 +1425,14 @@ export type ChatEncryption = {
 };
 
 export type OmemoEncryptionOptions = {
+  /** Async native primitives used by the mobile app. */
+  crypto?: {
+    publicKey: (privateKey: Uint8Array) => Promise<Uint8Array>;
+    sharedSecret: (privateKey: Uint8Array, publicKey: Uint8Array) => Promise<Uint8Array>;
+    hkdf: (input: Uint8Array, salt: Uint8Array, info: Uint8Array, length: number) => Promise<Uint8Array>;
+    encrypt: (key: Uint8Array, iv: Uint8Array, plaintext: Uint8Array) => Promise<Uint8Array>;
+    decrypt: (key: Uint8Array, iv: Uint8Array, ciphertext: Uint8Array) => Promise<Uint8Array>;
+  };
   storage?: ChatKeyValueStore;
   stateKeyPrefix?: string;
   /** Public discovery records. Defaults to a memory cache backed by `storage`. */
@@ -1615,6 +1623,9 @@ const XMPP_STREAM_MANAGEMENT_NS = "urn:xmpp:sm:3";
 const XMPP_STABLE_ID_NS = "urn:xmpp:sid:0";
 const XMPP_MUC_NS = "http://jabber.org/protocol/muc";
 const XMPP_MUC_USER_NS = "http://jabber.org/protocol/muc#user";
+const XMPP_PUBSUB_EVENT_NS = "http://jabber.org/protocol/pubsub#event";
+const XMPP_MUCSUB_MESSAGES_NODE = "urn:xmpp:mucsub:nodes:messages";
+const XMPP_MUC_SENDER_NS = "urn:lulafi:muc-sender:1";
 const XMPP_DIRECT_MUC_INVITE_NS = "jabber:x:conference";
 export const XMPP_EMERGENCY_NS = "urn:lulafi:emergency:1" as const;
 /** Namespace of the `<event>` element a server event carries — see `ChatServerEvent`. */
@@ -3523,6 +3534,16 @@ class LulaChatClient implements ChatClient {
   }
 
   private getMucRealSenderJid(stanza: XmppElementLike): string | undefined {
+    // The shared archive's virtual MUC/Sub results can omit muc#user JIDs.
+    // This tag is assigned by our server on authenticated group ingress.
+    const roomJid = normalizeBareDeviceId(addressToString(stanza.attrs?.from));
+    const sender = stanza.getChild?.("sender", XMPP_MUC_SENDER_NS);
+    const senderJid = trimToUndefined(sender?.attrs?.jid);
+    if (roomJid.endsWith(`@conference.${this.config.domain}`) &&
+        sender?.attrs?.by === this.config.domain && senderJid &&
+        normalizeBareDeviceId(senderJid).split("@")[1] === this.config.domain) {
+      return senderJid;
+    }
     const mucUser =
       stanza.getChild?.("x", XMPP_MUC_USER_NS) ?? stanza.getChild?.("x");
     return (
@@ -3531,6 +3552,26 @@ class LulaChatClient implements ChatClient {
         (addressToString(stanza.attrs?.from) ?? "").toLowerCase(),
       )
     );
+  }
+
+  private unwrapMucSubMessage(stanza: XmppElementLike): XmppElementLike | null {
+    const items = stanza.getChild?.("event", XMPP_PUBSUB_EVENT_NS)?.getChild?.("items");
+    if (items?.attrs?.node !== XMPP_MUCSUB_MESSAGES_NODE) return null;
+    const from = addressToString(stanza.attrs?.from)?.toLowerCase() ?? "";
+    const roomJid = normalizeBareDeviceId(from);
+    if (from !== roomJid || !roomJid.endsWith(`@conference.${this.config.domain}`)) return null;
+    const recipient = normalizeBareDeviceId(addressToString(stanza.attrs?.to));
+    if (recipient && recipient !== this.getBareDeviceId()) return null;
+    const entries = items.getChildren?.("item") ?? [];
+    if (entries.length !== 1) return null;
+    const message = entries[0].getChild?.("message", "jabber:client") ??
+      entries[0].getChild?.("message");
+    if (message?.attrs?.type !== "groupchat" ||
+        normalizeBareDeviceId(addressToString(message.attrs.from)).toLowerCase() !== roomJid) return null;
+    const thread = trimToUndefined(message.getChildText?.("thread"));
+    const registered = thread ? this.groupRooms.get(thread) : undefined;
+    if (registered && registered.mucJid !== roomJid) return null;
+    return message;
   }
 
   private parseGroupInvitation(
@@ -3617,11 +3658,20 @@ class LulaChatClient implements ChatClient {
     const carbon = this.unwrapCarbonMessage(stanza);
     if (!carbon && (stanza.getChild?.("sent", XMPP_CARBONS_NS) ||
                     stanza.getChild?.("received", XMPP_CARBONS_NS))) return;
-    const messageStanza = carbon?.message ?? stanza;
+    const envelope = carbon?.message ?? stanza;
+    const subItems = envelope.getChild?.("event", XMPP_PUBSUB_EVENT_NS)?.getChild?.("items");
+    const isMucSub = subItems?.attrs?.node?.startsWith("urn:xmpp:mucsub:nodes:") === true;
+    const subscriptionMessage = isMucSub ? this.unwrapMucSubMessage(envelope) : null;
+    if (isMucSub && !subscriptionMessage) {
+      this.log("warn", "chat_mucsub_event_rejected", { from: envelope.attrs?.from });
+      return;
+    }
+    const messageStanza = subscriptionMessage ?? envelope;
     // XEP-0297 puts the replay delay beside the inner message. Preserve it
     // before unwrapping so older linked-device copies retain their archive time.
     const transportTimestamp = parseServerMessageTimestamp(messageStanza, this.config.domain) ??
-      carbon?.timestamp ?? parseTrustedDelayTimestamp(messageStanza, this.config.domain);
+      carbon?.timestamp ?? parseTrustedDelayTimestamp(envelope, this.config.domain) ??
+      parseTrustedDelayTimestamp(messageStanza, this.config.domain);
     const attrs = messageStanza.attrs ?? {};
     const groupInvitation = this.parseGroupInvitation(messageStanza);
     if (groupInvitation) {
@@ -4761,7 +4811,7 @@ export function createOmemoEncryption(
     }
 
     const privateKey = nobleRandomBytes(32);
-    const publicKey = x25519.getPublicKey(privateKey);
+    const publicKey = options.crypto ? await options.crypto.publicKey(privateKey) : x25519.getPublicKey(privateKey);
     const nextState: OmemoState = {
       bareJid,
       omemoDeviceId: Math.max(1, bytesToUint32(nobleRandomBytes(4))),
@@ -5088,10 +5138,11 @@ export function createOmemoEncryption(
       bareJid, peerBareJid, () => fetchSnapshot(context, peerBareJid),
       (error) => context.logger?.warn?.("chat_omemo_background_refresh_failed", { peer: peerBareJid, error }),
     );
-    return snapshot.devices.map(({ deviceId, identityKey }) => ({
+    return await Promise.all(snapshot.devices.map(async ({ deviceId, identityKey }) => ({
       peerDeviceId: deviceId,
-      sharedSecret: x25519.getSharedSecret(ownPrivateKey, base64ToBytes(identityKey)),
-    }));
+      sharedSecret: options.crypto ? await options.crypto.sharedSecret(ownPrivateKey, base64ToBytes(identityKey)) :
+        x25519.getSharedSecret(ownPrivateKey, base64ToBytes(identityKey)),
+    })));
   };
 
   return {
@@ -5180,11 +5231,11 @@ export function createOmemoEncryption(
             : {}),
         }),
       );
-      const ciphertext = gcm(contentKey, iv).encrypt(plaintext);
+      const ciphertext = options.crypto ? await options.crypto.encrypt(contentKey, iv, plaintext) : gcm(contentKey, iv).encrypt(plaintext);
 
-      const keyElements = sessions.map((session) => {
+      const keyElements = await Promise.all(sessions.map(async (session) => {
         const wrapSalt = nobleRandomBytes(OMEMO_KEY_WRAP_BYTES);
-        const wrapMask = hkdf(
+        const wrapMask = options.crypto ? await options.crypto.hkdf(session.sharedSecret, wrapSalt, OMEMO_WRAP_INFO, OMEMO_AES_KEY_BYTES) : hkdf(
           sha256,
           session.sharedSecret,
           wrapSalt,
@@ -5201,7 +5252,7 @@ export function createOmemoEncryption(
           },
           bytesToBase64(wrappedBundle),
         );
-      });
+      }));
 
       return {
         body: "[encrypted]",
@@ -5260,11 +5311,11 @@ export function createOmemoEncryption(
         const keyMaterial = base64ToBytes(selectedKeyBase64);
         const iv = base64ToBytes(ivBase64);
         const ciphertext = base64ToBytes(payloadBase64);
-        const sharedSecret = x25519.getSharedSecret(ownPrivateKey, senderPublicKey);
+        const sharedSecret = options.crypto ? await options.crypto.sharedSecret(ownPrivateKey, senderPublicKey) : x25519.getSharedSecret(ownPrivateKey, senderPublicKey);
 
         let contentKey: Uint8Array;
         if (keyMaterial.length === OMEMO_KEY_WRAP_BYTES) {
-          contentKey = hkdf(
+          contentKey = options.crypto ? await options.crypto.hkdf(sharedSecret, keyMaterial, OMEMO_INFO, OMEMO_AES_KEY_BYTES) : hkdf(
             sha256,
             sharedSecret,
             keyMaterial,
@@ -5274,7 +5325,7 @@ export function createOmemoEncryption(
         } else if (keyMaterial.length === OMEMO_KEY_WRAP_BUNDLE_BYTES) {
           const wrapSalt = keyMaterial.slice(0, OMEMO_KEY_WRAP_BYTES);
           const wrappedKey = keyMaterial.slice(OMEMO_KEY_WRAP_BYTES);
-          const wrapMask = hkdf(
+          const wrapMask = options.crypto ? await options.crypto.hkdf(sharedSecret, wrapSalt, OMEMO_WRAP_INFO, OMEMO_AES_KEY_BYTES) : hkdf(
             sha256,
             sharedSecret,
             wrapSalt,
@@ -5286,7 +5337,7 @@ export function createOmemoEncryption(
           return { body: "", metadata: undefined };
         }
 
-        const plaintext = gcm(contentKey, iv).decrypt(ciphertext);
+        const plaintext = options.crypto ? await options.crypto.decrypt(contentKey, iv, ciphertext) : gcm(contentKey, iv).decrypt(ciphertext);
         const parsed = JSON.parse(new TextDecoder().decode(plaintext)) as unknown;
         if (!isRecord(parsed)) {
           return { body: "", metadata: undefined };

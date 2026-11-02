@@ -812,6 +812,14 @@ export type ChatEncryption = {
     decrypt: (input: ChatDecryptInput, context: ChatEncryptionContext) => Promise<ChatDecryptedMessage | null> | ChatDecryptedMessage | null;
 };
 export type OmemoEncryptionOptions = {
+    /** Async native primitives used by the mobile app. */
+    crypto?: {
+        publicKey: (privateKey: Uint8Array) => Promise<Uint8Array>;
+        sharedSecret: (privateKey: Uint8Array, publicKey: Uint8Array) => Promise<Uint8Array>;
+        hkdf: (input: Uint8Array, salt: Uint8Array, info: Uint8Array, length: number) => Promise<Uint8Array>;
+        encrypt: (key: Uint8Array, iv: Uint8Array, plaintext: Uint8Array) => Promise<Uint8Array>;
+        decrypt: (key: Uint8Array, iv: Uint8Array, ciphertext: Uint8Array) => Promise<Uint8Array>;
+    };
     storage?: ChatKeyValueStore;
     stateKeyPrefix?: string;
     /** Public discovery records. Defaults to a memory cache backed by `storage`. */
