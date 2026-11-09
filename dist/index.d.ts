@@ -42,6 +42,7 @@ export type ChatConversationType = "form_submission";
 export declare const CHAT_REACTION_INTERACTION_TYPE: "CHAT_REACTION";
 export declare const CHAT_REACTION_EMOJIS: readonly ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 export type ChatReactionEmoji = string;
+export declare const CHAT_EMOJI_UNICODE_VERSION = "18.0";
 export type ChatReplyReference = {
     messageId: string;
     body: string;

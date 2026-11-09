@@ -5,6 +5,7 @@ export default defineConfig({
   format: ["esm", "cjs"],
   target: "es2022",
   splitting: false,
+  noExternal: ["emojibase-regex"],
   sourcemap: true,
   clean: false,
   dts: false,

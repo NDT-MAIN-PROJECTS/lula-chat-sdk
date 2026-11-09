@@ -1,3 +1,4 @@
+import emojiRegexModule from "emojibase-regex/emoji-loose.js";
 import { getMessageEditError, type ChatMessageEditTarget } from "./message-edit.js";
 export { CHAT_MESSAGE_EDIT_WINDOW_MS, getMessageEditError, isMessageEditWithinWindow } from "./message-edit.js";
 export type { ChatMessageEditTarget, ChatMessageEditError } from "./message-edit.js";
@@ -83,10 +84,13 @@ export const CHAT_REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "
 
 export type ChatReactionEmoji = string;
 
-const CHAT_REACTION_MAX_CODE_POINTS = 16;
-const CHAT_REACTION_EMOJI_PATTERN = /[\u2600-\u27BF\u{1F1E6}-\u{1FAFF}]/u;
-const CHAT_REACTION_EMOJI_SEQUENCE_PATTERN =
-  /^[\u200D\uFE0F\u2600-\u27BF\u{1F1E6}-\u{1FAFF}]+$/u;
+// Generated Unicode data stays in sync with the picker dataset, without shipping names/categories in core.
+export const CHAT_EMOJI_UNICODE_VERSION = "18.0";
+const CHAT_REACTION_MAX_CODE_POINTS = 64;
+// The upstream CJS package has ESM-style declarations; NodeNext otherwise infers a nested default.
+const EMOJI_REGEX = emojiRegexModule as unknown as RegExp;
+const CHAT_REACTION_EMOJI_SEQUENCE_PATTERN = new RegExp(`^(?:${EMOJI_REGEX.source})$`);
+const STANDALONE_EMOJI_COMPONENT = /^[\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u{1F9B0}-\u{1F9B3}]$/u;
 
 export type ChatReplyReference = {
   messageId: string;
@@ -1003,7 +1007,7 @@ export function isChatReactionEmoji(value: unknown): value is ChatReactionEmoji 
     normalized.length > 0 &&
     !/\s/u.test(normalized) &&
     Array.from(normalized).length <= CHAT_REACTION_MAX_CODE_POINTS &&
-    CHAT_REACTION_EMOJI_PATTERN.test(normalized) &&
+    !STANDALONE_EMOJI_COMPONENT.test(normalized) &&
     CHAT_REACTION_EMOJI_SEQUENCE_PATTERN.test(normalized)
   );
 }
@@ -1054,7 +1058,10 @@ export function parseChatReactionEvent(
 }
 
 export function isChatReactionControlMessage(message: ChatInteractionMessageLike): boolean {
-  return Boolean(parseChatReactionEvent(message));
+  // Envelope recognition must not depend on this client's emoji catalogue.
+  // Unsupported or malformed reactions remain in raw history, but must not
+  // turn into ordinary chat bubbles when their payload cannot be projected.
+  return message.metadata?.chatInteractionType === CHAT_REACTION_INTERACTION_TYPE;
 }
 
 export function buildChatInteractionTimeline(

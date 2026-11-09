@@ -17,7 +17,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "NOTICE"
   ],
   "scripts": {
     "build": "npm run test && npm run clean && npm run build:js && npm run build:types && npm run test:unit",
@@ -46,6 +47,7 @@
   "devDependencies": {
     "@types/node": "^20.1.0",
     "@types/xmpp__client": "^0.14.1",
+    "emojibase-regex": "18.0.0",
     "rimraf": "^4.4.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.2"
