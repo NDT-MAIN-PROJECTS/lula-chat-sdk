@@ -866,3 +866,55 @@ not grant access or prove the submitter's identity. The server must enforce
 public form access and the outbound-only account policy. SDK configuration
 does not reject incoming messages at the server.
 
+## Full Unicode emoji reactions
+
+`isChatReactionEmoji` validates one complete emoji sequence using generated `emojibase-regex` 18.0 patterns. `CHAT_EMOJI_UNICODE_VERSION` exposes the validation version. Keycaps, country/subdivision flags, skin tones and ZWJ sequences are accepted; text, multiple emojis and standalone components are rejected. Legacy forms without an emoji-presentation selector remain accepted. The exact sequence is preserved for reaction identity and removal; do not strip selectors, skin tones, joiners or tag characters.
+
+### Data and rendering
+
+Emojibase replaces the previous handwritten Unicode-range validator with a versioned, generated matcher. The SDK bundles only the matcher, without runtime downloads, names, categories, fonts or artwork. Client pickers can use the corresponding pinned `emojibase-data` for search labels, categories and variants.
+
+This standardizes the supported Unicode sequences, not their artwork. Native iOS, Samsung/Android and desktop fonts can draw the same sequence differently. A newer SDK cannot add missing glyphs to an older OS: a valid emoji can still appear as a box or separate characters. Clients requiring identical artwork or glyph-availability filtering must implement that rendering policy separately.
+
+### Compatibility and rollout
+
+| Receiving client | Behaviour |
+| --- | --- |
+| This SDK, recognized emoji | Parses the reaction; `buildChatInteractionTimeline` aggregates it on the target message. Rendering depends on the client's font. |
+| This SDK, unrecognized or malformed reaction | `parseChatReactionEvent` returns `undefined`. The control envelope is still recognized, excluded from the projected chat timeline, and retained unchanged in raw events/history for later reprocessing. It is not converted into an ordinary message. |
+| Already-installed older SDK | Its shipped validator and UI decide the outcome. Version 0.1.43's range check rejects valid examples such as `⭐` and `1️⃣`; some newer symbols happen to pass its broad ranges. Rejected controls can appear as standalone messages in its old projection. Updating this SDK cannot change that installed code. |
+| Client without this SDK | Interoperable only if it implements the reaction metadata contract below and compatible transport, decryption and timeline handling. Treating every received body as chat text will not display proper reactions. |
+
+There is no peer capability negotiation or automatic downgrade in this protocol. For a new Unicode release, upgrade receiving SDKs/validators in mobile, desktop and connector clients first, then expose the expanded sending picker. Keep compatible choices available during mixed-version deployments; do not assume every installed client supports all new reactions. A client's picker is not itself the receive-side validator.
+
+### Clients that do not use the SDK
+
+`addReaction` and `removeReaction` produce the same logical message format as before. After the normal transport/decryption step, a reaction looks like:
+
+```json
+{
+  "id": "reaction-event-id",
+  "body": "👩🏿‍💻",
+  "metadata": {
+    "messageType": "CHAT_MESSAGE",
+    "chatInteractionType": "CHAT_REACTION",
+    "reactionToId": "target-message-id",
+    "reactionEmoji": "👩🏿‍💻",
+    "reactionActorId": "user-id",
+    "reactionRemoved": false
+  }
+}
+```
+
+The target is the original message's interaction ID (`metadata.canonicalEventId` when present, otherwise its ID). Use a new event ID for removal, the same target/actor/exact emoji, and `reactionRemoved: true`. Normalize linked-device identities to the same actor, deduplicate by target/emoji/actor, and apply additions/removals in timeline order. Route `CHAT_REACTION` envelopes away from ordinary message bubbles even if their emoji is unsupported. The SDK is optional; this contract is not. Matching code points identify the same reaction, while visual artwork can differ.
+
+### Version choice and updates
+
+Emoji 18 is the latest released Unicode emoji repertoire as of 9 November 2026, and is supported by the pinned Emojibase 18.0.0 packages. It is a standards version, not an arbitrary palette size or a guarantee of OS font support. We do not target unreleased Emoji 19. References: [Unicode's release list](https://www.unicode.org/releases/) and [UTS #51 revision 31](https://www.unicode.org/reports/tr51/tr51-31.html).
+
+For an intentional upgrade:
+
+1. Check the final Unicode release and pin the matching matcher and client catalogue versions together.
+2. Update `CHAT_EMOJI_UNICODE_VERSION`, regenerate the independent fixture from the immutable official URL with `node scripts/update-emoji-fixture.mjs 18.0` (replace the version for an upgrade), and keep the source URL/SHA-256 in the fixture.
+3. Run `npm run build`. Tests cover the complete Unicode fixture, legacy presentation forms, raw non-SDK events, add/remove round trips, and unsupported control filtering. Test real fonts separately on supported OS versions.
+4. Publish the SDK, deploy receiving clients, replace temporary consumer patches with the released version, and only then enable new sending choices. Versions are pinned, so catalogue updates cannot silently change an installed application's behaviour.
