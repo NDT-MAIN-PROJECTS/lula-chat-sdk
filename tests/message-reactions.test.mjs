@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { xml } from "@xmpp/client";
 import {
   CHAT_EMOJI_UNICODE_VERSION,
   isChatReactionEmoji,
@@ -151,6 +152,61 @@ test("public add/remove methods preserve the non-SDK wire contract and reject un
   );
   assert.equal(sent.length, 2);
 });
+
+test("only reaction stanzas carry a content-free push hint in direct, form and group rooms", async () => {
+  const stanzas = [];
+  const encryptedMessages = [];
+  const client = createChatClient({
+    apiKey: "test",
+    userId: "alice",
+    deviceId: "phone",
+    xmppDomain: "chat.test",
+    password: "test",
+    requireEncryptedPayloads: true,
+    encryption: {
+      encrypt: (message) => {
+        encryptedMessages.push(message);
+        return {
+          body: "This message is encrypted",
+          children: [xml("encrypted", { xmlns: "eu.siacs.conversations.axolotl" }, "ciphertext")],
+        };
+      },
+    },
+  });
+  client.xmpp = { send: async (stanza) => stanzas.push(stanza) };
+  client.connect = async () => {};
+  client.ensureGroupRoomJoined = async () => {};
+  await client.updateGroupRoom({
+    roomId: "group-room",
+    mucJid: "room@conference.chat.test",
+    memberJids: ["i.bob@chat.test"],
+  });
+
+  for (const roomId of ["direct-room", "form-room", "group-room"]) {
+    const target = { roomId, toDeviceId: "i.bob@chat.test" };
+    const reaction = { ...target, targetMessageId: "canonical-target", emoji: "👍" };
+    await client.addReaction(reaction);
+    await client.removeReaction(reaction);
+    await client.sendChatMessage({ ...target, body: reaction.emoji });
+
+    const [add, remove, textMessage] = stanzas.slice(-3);
+    for (const stanza of [add, remove]) {
+      const hint = stanza.getChild("no-push", "urn:lulafi:push:1");
+      assert.ok(hint, stanza.toString());
+      assert.deepEqual(hint.attrs, { xmlns: "urn:lulafi:push:1" });
+      assert.equal(hint.children.length, 0);
+      assert.equal(stanza.getChildText("thread"), roomId);
+      assert.equal(stanza.attrs.type, roomId === "group-room" ? "groupchat" : "chat");
+      assert.ok(stanza.getChild("encrypted", "eu.siacs.conversations.axolotl"));
+      assert.ok(!stanza.toString().includes(reaction.targetMessageId));
+      assert.ok(!stanza.toString().includes(reaction.emoji));
+    }
+    assert.equal(encryptedMessages.at(-3).metadata.reactionRemoved, false);
+    assert.equal(encryptedMessages.at(-2).metadata.reactionRemoved, true);
+    assert.equal(textMessage.getChild("no-push", "urn:lulafi:push:1"), undefined);
+  }
+});
+
 test("rejects text, multiple emojis and standalone components", () => {
   for (const value of [
     null,

@@ -600,6 +600,7 @@ var XMPP_CARBONS_NS = "urn:xmpp:carbons:2";
 var XMPP_FORWARD_NS = "urn:xmpp:forward:0";
 var XMPP_FALLBACK_NS = "urn:xmpp:fallback:0";
 var XMPP_HINTS_NS = "urn:xmpp:hints";
+var XMPP_LULA_PUSH_NS = "urn:lulafi:push:1";
 var XMPP_RETRACT_NS = "urn:xmpp:message-retract:1";
 var XMPP_STREAM_MANAGEMENT_NS = "urn:xmpp:sm:3";
 var XMPP_STABLE_ID_NS = "urn:xmpp:sid:0";
@@ -1299,6 +1300,9 @@ var LulaChatClient = class {
           xml("origin-id", { xmlns: XMPP_STABLE_ID_NS, id })
         ];
         if (roomId) children.push(xml("thread", {}, roomId));
+        if (isChatReactionControlMessage({ metadata })) {
+          children.push(xml("no-push", { xmlns: XMPP_LULA_PUSH_NS }));
+        }
         const emergency = parseEmergencyMetadata(metadata);
         if (emergency) {
           children.push(

@@ -1625,6 +1625,7 @@ const XMPP_CARBONS_NS = "urn:xmpp:carbons:2";
 const XMPP_FORWARD_NS = "urn:xmpp:forward:0";
 const XMPP_FALLBACK_NS = "urn:xmpp:fallback:0";
 const XMPP_HINTS_NS = "urn:xmpp:hints";
+const XMPP_LULA_PUSH_NS = "urn:lulafi:push:1";
 const XMPP_RETRACT_NS = "urn:xmpp:message-retract:1";
 const XMPP_STREAM_MANAGEMENT_NS = "urn:xmpp:sm:3";
 const XMPP_STABLE_ID_NS = "urn:xmpp:sid:0";
@@ -2531,6 +2532,10 @@ class LulaChatClient implements ChatClient {
         ];
 
         if (roomId) children.push(xml("thread", {}, roomId));
+        // ejabberd can suppress the alert without reading the encrypted reaction.
+        if (isChatReactionControlMessage({ metadata })) {
+          children.push(xml("no-push", { xmlns: XMPP_LULA_PUSH_NS }));
+        }
         const emergency = parseEmergencyMetadata(metadata);
         if (emergency) {
           children.push(
